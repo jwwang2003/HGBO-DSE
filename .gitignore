@@ -1,0 +1,7 @@
+__pycache__
+
+benchmark/MachSuite/*/*/*
+dse_ds/MachSuite/*/*/*/p1
+bome/*.db
+
+vitis_hls.log
