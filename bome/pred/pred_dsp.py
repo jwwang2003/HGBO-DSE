@@ -74,19 +74,21 @@ class HierNet(torch.nn.Module):
 
 
 def dsp_pred(data):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model_path = os.path.abspath('../hgp/model/dsp_mae_h64_d0_checkpoint_test.pt')
-    params = torch.load(model_path, map_location=device)
+    # params = torch.load(model_path, map_location=device)
     model = HierNet(in_channels=15, hidden_channels=64, num_layers=3, conv_type='sage',
                     hls_dim=6, drop_out=0.0)
+    model.load_state_dict(torch.load(model_path, map_location="cuda:0")['model'], strict=False)
     model = model.to(device)
-    model.load_state_dict(params['model'])
+    # model.load_state_dict(params['model'])
 
     model.eval()
     with torch.no_grad():
+        data = data.to(device)
         hls_attr = data['hls_attr']
         num = data.x.shape[0]
-        batch = torch.tensor([0 for i in range(num)])
+        batch = torch.tensor([0 for i in range(num)]).to(device)
         out = model(data.x, data.edge_index, batch, hls_attr)
     dsp = out.view(-1).item()
     if dsp < 0:
