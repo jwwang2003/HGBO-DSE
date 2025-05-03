@@ -9,7 +9,6 @@ from torch_geometric.nn.pool import global_add_pool, global_max_pool, SAGPooling
 
 jknFlag = 0
 
-
 class HierNet(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers, conv_type, hls_dim, drop_out=0.0, pool_ratio=0.5):
         super(HierNet, self).__init__()
@@ -75,7 +74,7 @@ class HierNet(torch.nn.Module):
 
 def dsp_pred(data):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model_path = os.path.abspath('../hgp/model/dsp_mae_h64_d0_checkpoint_test.pt')
+    model_path = os.path.abspath('./hgp/model/dsp_mae_h64_d0_checkpoint_test.pt')
     # params = torch.load(model_path, map_location=device)
     model = HierNet(in_channels=15, hidden_channels=64, num_layers=3, conv_type='sage',
                     hls_dim=6, drop_out=0.0)

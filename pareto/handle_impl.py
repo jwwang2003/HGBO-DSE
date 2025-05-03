@@ -14,7 +14,7 @@ index = 0
 name = nameList[index]
 bench = folderList[index]
 
-path_impl = os.path.abspath('../dse_ds/MachSuite/impl_ds')
+path_impl = os.path.abspath('./dse_ds/MachSuite/impl_ds')
 path_impl = os.path.join(path_impl, bench, 'p1/script')
 listPPA_impl = getListPPA(path_impl)
 

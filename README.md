@@ -118,9 +118,9 @@ Specify "--alg [options: motpe_d, motpe_f, motpe_fl, nsga, sa]" to choose the DS
 - --process [options: 1, 2, 3, ...] (The current process number)
 
 ### Run DSE
-1. cd bome
-2. source /mnt/sda1/Xilinx/Vitis/2022.1/settings64.sh
-3. python3 hls_dse.py
+<!-- 1. cd bome -->
+1. source /mnt/sda1/Xilinx/Vitis/2022.1/settings64.sh
+2. python -m bome.hls_dse
 
 When running the above commands, the default settings are adopted.
 You can add the arguments according to your needs.

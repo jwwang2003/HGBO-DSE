@@ -1,28 +1,41 @@
 import optuna
 import argparse
-import subprocess
 import pyDOE
-from alg.sa_sampler import SimulatedAnnealingSampler
-from hls_basic import HLSBasic
-from tdm.gen_config import *
-from tdm.design_space import *
-from hgp_pred import *
-from get_ppa import *
-from save_report import *
-import sys
-sys.path.append("./alg")
-print(sys.path)
+from functools import partial
+
+from bome.alg.sa_sampler import SimulatedAnnealingSampler
+from bome.hls_basic import HLSBasic
+from bome.tdm.gen_config import *
+from bome.tdm.design_space import *
+from bome.hgp_pred import *
+from bome.get_ppa import *
+from bome.save_report import *
+
+from bome.vitis_hls import VitisHLSRunner
 
 
 noLatList = ['bfs', 'fft', 'nw', 'stencil']
 
+class IterationCallback:
+    def __init__(self, log: Logger):
+        self.caseNumber = 0
+        self.log = log
+        
+    def __call__(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
+        self.caseNumber = self.caseNumber + 1
+        self.log.info(f"[Inference] Iteration: {trial.number}, Duration: {trial.duration}, Params: {trial.params}")
+        # socketio.emit('progress_update', {'current': self.caseNumber})
 
-def objective(trial):
-    global basic
+def objective(trial, basic: HLSBasic):
+    log = basic.log
+
     # get the global variables from basic
     dataset_path = basic.dataset_path
+    
+    # parsed versions of config.yaml & params.yaml
     static_config = basic.static_config
     params = basic.params
+
     ori_prj_path = basic.ori_prj_path
     hls_temp = basic.hls_temp
     hls_script_path = basic.hls_script_path
@@ -33,15 +46,15 @@ def objective(trial):
     process = basic.process
     mode = basic.mode
 
-    tempDir, paraDict = config_tree_space(static_config, encode, trial, params)
-    print(paraDict)
+    tempDir, paraDict = config_tree_space(static_config, encode, trial, params, basic.log)
+    # log.info(paraDict)
 
     # generate tcl for HLS
     iterNum = trial.number
     dir_json = os.path.join(hls_script_path, "dir_%d.json" % iterNum)
     dir_tcl = os.path.join(hls_script_path, "dir_%d.tcl" % iterNum)
     hls_tcl = os.path.join(hls_script_path, "hls_%d.tcl" % iterNum)
-    genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_json)
+    genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_json, basic.log)
     f_script = open(hls_temp, "r")
     content = f_script.read()
     f_script.close()
@@ -50,18 +63,18 @@ def objective(trial):
     f_script.write(content)
     f_script.close()
     if mode == 'hgp':
-        print("Running Vitis HLS to get adb and adb.xml files...")
-        p = subprocess.Popen('vitis_hls -f ' + hls_tcl, shell=True)
-        try:
-            p.wait(3600)
-        except subprocess.TimeoutExpired:
-            p.terminate()
-            print("[INFO] Subprocess timeout !")
-            with open('./runtime.log', 'a') as tlog:
-                tlog.write(("Iteration: %d, Timeout !" % iterNum) + '\n')
-        print("Using HGP to predict PPA values...")
+        log.info("Running Vitis HLS to get adb and adb.xml files...")
+        
+        hls_runner = VitisHLSRunner(
+            tcl_script=hls_tcl,
+            context=basic.get_cwd(),
+            check=False
+        )
+        hls_runner.run()
+        
+        basic.log.info("Using HGP to predict PPA values...")
         rpt_list, prj_path = get_adb_rpt_verilog(case, top, alg, ori_prj_path, dataset_path, iterNum, process, mode)
-        dictPPA, fail_flag = getHLS(params, rpt_list)  # get results from HLS
+        dictPPA, fail_flag = getHLS(params, rpt_list, log)  # get results from HLS
         if fail_flag:
             dictPPA['IMPL'] = {'LUT': 1e8, 'FF': 1e8, 'DSP': 1e8, 'BRAM': 1e8, 'CP': 1e8, 'PWR': 1e8}
         else:
@@ -69,16 +82,16 @@ def objective(trial):
             hls_attr = list(dict_hls.values())
             dictPPA['IMPL'] = getGNNPred(prj_path, hls_attr, case)
     else:
-        print("Running Vitis HLS and Vivado to get PPA...")
-        p = subprocess.Popen('vitis_hls -f ' + hls_tcl, shell=True)
-        try:
-            p.wait(3600)
-        except subprocess.TimeoutExpired:
-            p.terminate()
-            print("[INFO] Subprocess timeout !")
-            with open('./runtime.log', 'a') as tlog:
-                tlog.write(("Iteration: %d, Timeout !" % iterNum) + '\n')
-        print("Collecting adb files, hls/syn/impl report and Verilog files...")
+        basic.log.info("Running Vitis HLS and Vivado to get PPA...")
+        
+        hls_runner = VitisHLSRunner(
+            tcl_script=hls_tcl,
+            context=basic.get_cwd(),
+            check=False
+        )
+        hls_runner.run()
+        
+        log.info("Collecting adb files, hls/syn/impl report and Verilog files...")
         rpt_list, _ = get_adb_rpt_verilog(case, top, alg, ori_prj_path, dataset_path, iterNum, process, mode)
         dictPPA, _ = getPPA(params, rpt_list)
 
@@ -102,13 +115,15 @@ def objective(trial):
     return ppa
 
 
-def runDSE(basic):
-
+def runDSE(basic: HLSBasic, progress_callback=None):
     case = basic.case
     alg = basic.alg
     num = basic.num
     params = basic.params
     mode = basic.mode
+    encode = basic.encode
+    parallel = basic.parallel
+    isolated_path = basic.isolated
 
     # run lhs to pre-sample initial design points
     init_params = basic.paraDict
@@ -129,53 +144,57 @@ def runDSE(basic):
         study_name = case + "_" + mode + "_dse"
     else:
         study_name = case + "_" + alg + "_dse"
+        
+    storage_path = os.path.join(
+        isolated_path if isolated_path else "", study_name + ".db"
+    )
     if parallel:
         # Important: must create the corresponding database in MySQL.
         # Here is the method:
         # mysql -u root -p
         # CREATE DATABASE 'study_name';
         # SHOW DATABASES; (to see if the database is created successfully)
-        storage = "mysql+pymysql://root:password@localhost/" + study_name
-        print('Using MySQL Database to store the distributed running data!')
+        storage = "mysql+pymysql://root:password@localhost/" + storage_path
+        basic.log.info('Using MySQL Database to store the distributed running data!')
     else:
         # Sqlite is not suitable for distributed running.
-        storage = "sqlite:///" + study_name + ".db"
-        print('Using Sqlite Database to store data!')
-
+        storage = "sqlite:///" + storage_path
+        basic.log.info('Using Sqlite Database to store data!')
+    
     # specify random number seed
     seed = 12345
     # choose the algorithm for DSE
     if alg == "sa":
-        print("[INFO] Using Simulated Annealing for HLS DSE")
+        basic.log.info("Using Simulated Annealing for HLS DSE")
         sampler = SimulatedAnnealingSampler(seed=seed)
         study = optuna.create_study(storage=storage, study_name=study_name, sampler=sampler, direction="minimize",
                                     load_if_exists=True)
     else:
         if alg == 'motpe_d':
-            print("[INFO] Using Discrete Encoding and MOTPE based Bayesian Optimization for HLS DSE")
+            basic.log.info("Using Discrete Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
             sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
                                                  seed=seed)
         elif alg == "motpe_f":
-            print("[INFO] Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
+            basic.log.info("Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
             sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
                                                  seed=seed)
         elif alg == "motpe_fl":
-            print("[INFO] Using Float Encoding and Latin MOTPE based Bayesian Optimization for HLS DSE")
-            from alg.tpe_sampler import TPESampler
+            basic.log.info("Using Float Encoding and Latin MOTPE based Bayesian Optimization for HLS DSE")
+            from bome.alg.tpe_sampler import TPESampler
             n_ei_candidates = 24
             sampler = TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
                                  seed=seed, init_method='lhs', 
                                  init_params=init_params)
         elif alg == "nsga":
-            print("[INFO] Using NSGA-II for HLS DSE")
+            basic.log.info("Using NSGA-II for HLS DSE")
             sampler = optuna.samplers.NSGAIISampler(seed=seed)
         elif alg == "random":  # usually used to collect dataset
-            print("[INFO] Using Random Sampling for HLS DSE")
+            basic.log.info("Using Random Sampling for HLS DSE")
             sampler = optuna.samplers.RandomSampler(seed=seed)
         else:
-            print("[INFO] Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
+            basic.log.info("Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
             sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
                                                  seed=seed)
@@ -188,8 +207,14 @@ def runDSE(basic):
                                         directions=["minimize", "minimize", "minimize", "minimize"],
                                         load_if_exists=False)
 
-    study.optimize(objective, n_trials=num, show_progress_bar=True)
-    print("Number of finished trials: ", len(study.trials))
+    obj = partial(objective, basic=basic)
+
+    if progress_callback:
+        study.optimize(obj, n_trials=num, show_progress_bar=True, callbacks=[progress_callback])
+    else:
+        study.optimize(obj, n_trials=num, show_progress_bar=True)
+    
+    basic.log.info(f"Number of finished trials: {len(study.trials)}")
 
     if alg == "sa":
         optuna.visualization.plot_optimization_history(study)
@@ -198,109 +223,110 @@ def runDSE(basic):
         optuna.visualization.plot_contour(study)
         optuna.visualization.plot_slice(study)
 
-        print("Best trial:")
-        print("Value: ", study.best_trial.value)
-        print("Params: ")
+        basic.log.info("Best trial:")
+        basic.log.info(f"Value: {study.best_trial.value}")
+        basic.log.info("Params: ")
         for key, value in study.best_trial.params.items():
-            print("{}: {}".format(key, value))
+            basic.log.info("{}: {}".format(key, value))
     else:
-        print("Pareto front:")
+        basic.log.info("Pareto front:")
         trials = sorted(study.best_trials, key=lambda t: t.values)
         for trial in trials:
-            print("Trial#{}".format(trial.number))
-            print("Params: {}".format(trial.params))
-        print(f"Number of trials on the Pareto front: {len(study.best_trials)}")
+            basic.log.info("Trial#{}".format(trial.number))
+            basic.log.info("Params: {}".format(trial.params))
+        basic.log.info(f"Number of trials on the Pareto front: {len(study.best_trials)}")
 
         # Visualization
         if case in noLatList:
             trial_with_lowest_power = min(study.best_trials, key=lambda t: t.values[0])
-            print(f"Trial with lowest power: ")
-            print(f"\tnumber: {trial_with_lowest_power.number}")
-            print(f"\tparams: {trial_with_lowest_power.params}")
-            print(f"\tvalues: {trial_with_lowest_power.values}")
+            basic.log.info(f"Trial with lowest power: ")
+            basic.log.info(f"\tnumber: {trial_with_lowest_power.number}")
+            basic.log.info(f"\tparams: {trial_with_lowest_power.params}")
+            basic.log.info(f"\tvalues: {trial_with_lowest_power.values}")
 
             trial_with_best_cp = min(study.best_trials, key=lambda t: t.values[1])
-            print(f"Trial with best cp: ")
-            print(f"\tnumber: {trial_with_best_cp.number}")
-            print(f"\tparams: {trial_with_best_cp.params}")
-            print(f"\tvalues: {trial_with_best_cp.values}")
+            basic.log.info(f"Trial with best cp: ")
+            basic.log.info(f"\tnumber: {trial_with_best_cp.number}")
+            basic.log.info(f"\tparams: {trial_with_best_cp.params}")
+            basic.log.info(f"\tvalues: {trial_with_best_cp.values}")
 
             trial_with_smallest_area = min(study.best_trials, key=lambda t: t.values[2])
-            print(f"Trial with smallest area: ")
-            print(f"\tnumber: {trial_with_smallest_area.number}")
-            print(f"\tparams: {trial_with_smallest_area.params}")
-            print(f"\tvalues: {trial_with_smallest_area.values}")
+            basic.log.info(f"Trial with smallest area: ")
+            basic.log.info(f"\tnumber: {trial_with_smallest_area.number}")
+            basic.log.info(f"\tparams: {trial_with_smallest_area.params}")
+            basic.log.info(f"\tvalues: {trial_with_smallest_area.values}")
+            
+            if isolated_path == "":
+                fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
+                                                                        target_name="power")
+                fig_cp_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
+                                                                        target_name="cp")
+                fig_area_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[2],
+                                                                            target_name="area")
+                fig_pwr_h.show()
+                fig_cp_h.show()
+                fig_area_h.show()
 
-            fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
-                                                                       target_name="power")
-            fig_cp_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
-                                                                      target_name="cp")
-            fig_area_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[2],
+                fig_pwr_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[0],
+                                                                        target_name="power")
+                fig_cp_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[1],
+                                                                    target_name="cp")
+                fig_area_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[2],
                                                                         target_name="area")
-            fig_pwr_h.show()
-            fig_cp_h.show()
-            fig_area_h.show()
-
-            fig_pwr_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[0],
-                                                                    target_name="power")
-            fig_cp_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[1],
-                                                                   target_name="cp")
-            fig_area_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[2],
-                                                                     target_name="area")
-            fig_pwr_i.show()
-            fig_cp_i.show()
-            fig_area_i.show()
-
+                fig_pwr_i.show()
+                fig_cp_i.show()
+                fig_area_i.show()
         else:
             trial_with_lowest_power = min(study.best_trials, key=lambda t: t.values[0])
-            print(f"Trial with lowest power: ")
-            print(f"\tnumber: {trial_with_lowest_power.number}")
-            print(f"\tparams: {trial_with_lowest_power.params}")
-            print(f"\tvalues: {trial_with_lowest_power.values}")
+            basic.log.info(f"Trial with lowest power: ")
+            basic.log.info(f"\tnumber: {trial_with_lowest_power.number}")
+            basic.log.info(f"\tparams: {trial_with_lowest_power.params}")
+            basic.log.info(f"\tvalues: {trial_with_lowest_power.values}")
 
             trial_with_best_lat = min(study.best_trials, key=lambda t: t.values[1])
-            print(f"Trial with best lat: ")
-            print(f"\tnumber: {trial_with_best_lat.number}")
-            print(f"\tparams: {trial_with_best_lat.params}")
-            print(f"\tvalues: {trial_with_best_lat.values}")
+            basic.log.info(f"Trial with best lat: ")
+            basic.log.info(f"\tnumber: {trial_with_best_lat.number}")
+            basic.log.info(f"\tparams: {trial_with_best_lat.params}")
+            basic.log.info(f"\tvalues: {trial_with_best_lat.values}")
 
             trial_with_best_cp = min(study.best_trials, key=lambda t: t.values[2])
-            print(f"Trial with best cp: ")
-            print(f"\tnumber: {trial_with_best_cp.number}")
-            print(f"\tparams: {trial_with_best_cp.params}")
-            print(f"\tvalues: {trial_with_best_cp.values}")
+            basic.log.info(f"Trial with best cp: ")
+            basic.log.info(f"\tnumber: {trial_with_best_cp.number}")
+            basic.log.info(f"\tparams: {trial_with_best_cp.params}")
+            basic.log.info(f"\tvalues: {trial_with_best_cp.values}")
 
             trial_with_smallest_area = min(study.best_trials, key=lambda t: t.values[3])
-            print(f"Trial with smallest area: ")
-            print(f"\tnumber: {trial_with_smallest_area.number}")
-            print(f"\tparams: {trial_with_smallest_area.params}")
-            print(f"\tvalues: {trial_with_smallest_area.values}")
+            basic.log.info(f"Trial with smallest area: ")
+            basic.log.info(f"\tnumber: {trial_with_smallest_area.number}")
+            basic.log.info(f"\tparams: {trial_with_smallest_area.params}")
+            basic.log.info(f"\tvalues: {trial_with_smallest_area.values}")
 
-            fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
-                                                                       target_name="power")
-            fig_lat_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
-                                                                       target_name="lat")
-            fig_cp_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[2],
-                                                                      target_name="cp")
-            fig_area_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[3],
+            if isolated_path == "":
+                fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
+                                                                        target_name="power")
+                fig_lat_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
+                                                                        target_name="lat")
+                fig_cp_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[2],
+                                                                        target_name="cp")
+                fig_area_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[3],
+                                                                            target_name="area")
+                fig_pwr_h.show()
+                fig_lat_h.show()
+                fig_cp_h.show()
+                fig_area_h.show()
+
+                fig_pwr_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[0],
+                                                                        target_name="power")
+                fig_lat_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[1],
+                                                                        target_name="lat")
+                fig_cp_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[2],
+                                                                    target_name="cp")
+                fig_area_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[3],
                                                                         target_name="area")
-            fig_pwr_h.show()
-            fig_lat_h.show()
-            fig_cp_h.show()
-            fig_area_h.show()
-
-            fig_pwr_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[0],
-                                                                    target_name="power")
-            fig_lat_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[1],
-                                                                    target_name="lat")
-            fig_cp_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[2],
-                                                                   target_name="cp")
-            fig_area_i = optuna.visualization.plot_param_importances(study, target=lambda t: t.values[3],
-                                                                     target_name="area")
-            fig_pwr_i.show()
-            fig_lat_i.show()
-            fig_cp_i.show()
-            fig_area_i.show()
+                fig_pwr_i.show()
+                fig_lat_i.show()
+                fig_cp_i.show()
+                fig_area_i.show()
 
 
 if __name__ == "__main__":
@@ -331,9 +357,11 @@ if __name__ == "__main__":
     parallel = args.parallel
     process = args.process
 
-    root = os.path.abspath("../")
+    root = os.path.abspath("./")
+    # basic = HLSBasic(root, mode, bench, case, "", encode, num, alg, space, parallel, process, isolated="id123456")
     basic = HLSBasic(root, mode, bench, case, ver, encode, num, alg, space, parallel, process)
+    
+    iterationCallback = IterationCallback(basic.log)
+    runDSE(basic, iterationCallback)
 
-    runDSE(basic)
-
-    print("[INFO] HLS Design Space Exploration is Done!")
+    basic.log.info("HLS Design Space Exploration is Done!")

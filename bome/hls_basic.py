@@ -1,10 +1,30 @@
 import json
-from common import *
+import os
+import logging
+from logging import Logger
+from bome.log import setup_logger
+from bome.common import *
 
 
 class HLSBasic(object):
-    def __init__(self, root, mode, bench, case, ver, encode, num=100, alg='motpe_f', space='tree',
-                 parallel=False, process=1, device='xc7vx485tffg1761-2', clk='10'):
+    def __init__(
+        self,
+        root: str,
+        mode: str,
+        bench: str,
+        case: str,
+        ver: str,           # (optional) 
+        encode:str,
+        num=100,
+        alg='motpe_f',
+        space='tree',
+        parallel=False,
+        process=1,
+        device='xc7vx485tffg1761-2',
+        clk='10',
+        log: Logger=None,
+        isolated: str=None  # (optional) specifies a temporary directory for the working directory
+    ):
         self.root = root
         self.mode = mode
         self.bench = bench
@@ -30,7 +50,18 @@ class HLSBasic(object):
         self.top = None
         self.tempDir = None
         self.paraDict = None
+        self.log = log
+        self.isolated = isolated  # New isolated folder parameter
+        self.isolated_folder_path = None
 
+        # Initialization
+        if self.isolated:
+            self.create_isolated_folder()  # Create isolated folder if specified
+
+        if not self.log:
+            name = self.get_cwd().split("/")[-1]
+            self.log = setup_logger(f"hls_dse_{name}", self.get_cwd(), logging.DEBUG)
+        
         self.get_config_path()
         self.get_params_path()
         self.get_ori_prj_path()
@@ -38,39 +69,85 @@ class HLSBasic(object):
         self.get_temp_path()
         self.get_hls_temp_path()
         self.get_hls_script_path()
-        self.static_config = getYaml(self.config_path)
-        self.params = getYaml(self.params_path)
+        self.static_config = getYaml(self.config_path, self.log)
+        self.params = getYaml(self.params_path, self.log)
         self.config_space()
         self.gen_space_temp()
         self.gen_hls_temp_script()
 
+    def create_isolated_folder(self):
+        """Creates a folder for isolated files if specified"""
+        self.isolated_folder_path = os.path.join(self.root, self.isolated)
+        createFolder(self.isolated_folder_path)
+    
+    def get_cwd(self):
+        if self.isolated:
+            return self.isolated_folder_path
+        return self.root
+
     def get_config_path(self):
         if self.ver == "":
-            self.config_path = os.path.join(self.root, 'config', self.bench, self.case + '_config.yaml')
+            self.config_path = os.path.join(
+                self.get_cwd(), 
+                'config', 
+                self.bench, 
+                self.case + '_config.yaml'
+            )
         else:
-            self.config_path = os.path.join(self.root, 'config', self.bench, self.case + '_' + self.ver +
-                                            '_config.yaml')
+            self.config_path = os.path.join(
+                self.get_cwd(), 
+                'config', 
+                self.bench, 
+                self.case + '_' + self.ver + '_config.yaml'
+            )
         return self.config_path
 
     def get_params_path(self):
         if self.ver == "":
-            self.params_path = os.path.join(self.root, 'config', self.bench, self.case + '_params.yaml')
+            self.params_path = os.path.join(
+                self.get_cwd(), 
+                'config', 
+                self.bench,
+                self.case + '_params.yaml'
+            )
         else:
-            self.params_path = os.path.join(self.root, 'config', self.bench, self.case + '_' + self.ver +
-                                            '_params.yaml')
+            self.params_path = os.path.join(
+                self.get_cwd(), 
+                'config', 
+                self.bench, 
+                self.case + '_' + self.ver + '_params.yaml'
+            )
         return self.params_path
 
     def get_ori_prj_path(self):
-        self.ori_prj_path = os.path.join(self.root, 'benchmark', self.bench, self.case)
+        self.ori_prj_path = os.path.join(
+            self.isolated_folder_path if self.isolated else os.path.join(self.root, 'benchmark'), 
+            self.bench,
+            self.case
+        )
         if self.ver != "":
             self.ori_prj_path = os.path.join(self.ori_prj_path, self.ver)
         return self.ori_prj_path
 
     def get_dataset_path(self):
         if self.mode == 'impl':
-            self.dataset_path = os.path.join(self.root, 'dse_ds', self.bench, self.mode + '_ds', self.case)
+            self.dataset_path = os.path.join(
+                os.path.join(
+                    self.isolated_folder_path if self.isolated else self.root,
+                    "artifacts" if self.isolated else 'dse_ds'
+                ),
+                self.bench, 
+                self.mode + '_ds', self.case
+            )
         else:
-            self.dataset_path = os.path.join(self.root, 'dse_ds', self.bench, self.alg + '_ds', self.case)
+            self.dataset_path = os.path.join(
+                os.path.join(
+                    self.isolated_folder_path if self.isolated else self.root,
+                    "artifacts" if self.isolated else 'dse_ds'
+                ),
+                self.bench, 
+                self.alg + '_ds', self.case
+            )
         if self.ver != "":
             self.dataset_path = os.path.join(self.dataset_path, self.ver, 'p' + str(self.process))
         else:
@@ -124,8 +201,9 @@ class HLSBasic(object):
         fw.write('exit\n')
         fw.close()
 
+    # Method of parsing the configuration space (TDM)
     def config_space(self):
-        print("[INFO] Configuring the design space...")
+        self.log.info("[INFO] Configuring the design space...")
         tempDir = {"Option": basicOption(), "Function": {}, "Loop": {}, "Array": {}, "Interface": {}, "Operation": {}}
 
         config = self.static_config
@@ -284,8 +362,8 @@ class HLSBasic(object):
                             cntO = cntO + 1
         paraDict.update(paraOp)
 
-        print("[INFO] Total parameters: " + str(len(paraDict)))
-        print("[INFO] Design space configuration done!")
+        self.log.info("[INFO] Total parameters: " + str(len(paraDict)))
+        self.log.info("[INFO] Design space configuration done!")
         self.top = top
         self.tempDir = tempDir
         self.paraDict = paraDict

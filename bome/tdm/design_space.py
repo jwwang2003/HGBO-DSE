@@ -1,3 +1,4 @@
+from logging import Logger
 
 
 def basicOption():
@@ -13,10 +14,13 @@ def basicOption():
     }
 
 
-def config_tree_space(static_config, encode, trial, params):
+def config_tree_space(static_config, encode, trial, params, log: Logger=None):
     # Call this function to construct tree-structured design space,
     # which can remove the invalid configurations.
-    print("[INFO] Configuring tree-structured design space...")
+    if log:
+        log.info("[INFO] Configuring tree-structured design space...")
+    else:
+        print("[INFO] Configuring tree-structured design space...")
     tempDir = {"Option": basicOption(), "Function": {}, "Loop": {}, "Array": {}, "Interface": {}, "Operation": {}}
 
     # top = static_config["top"][0]
@@ -272,8 +276,12 @@ def config_tree_space(static_config, encode, trial, params):
                         cntO = cntO + 1
     paraDict.update(paraOp)
 
-    print("[INFO] Total parameters: " + str(len(paraDict)))
-    print("[INFO] Design space configuration done!")
+    if log:
+        log.info("[INFO] Total parameters: " + str(len(paraDict)))
+        log.info("[INFO] Design space configuration done!")
+    else:
+        print("[INFO] Total parameters: " + str(len(paraDict)))
+        print("[INFO] Design space configuration done!")
 
     return tempDir, paraDict
 

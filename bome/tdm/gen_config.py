@@ -1,4 +1,5 @@
 import json
+from logging import Logger
 from math import floor
 
 
@@ -147,7 +148,7 @@ def map_to_discrete(paraDict, params, n_start_trials):
     return init_params
 
 
-def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_json):
+def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_json, log: Logger=None):
     # Call this function when using tree-structured design space configuration
     top = static_config["top"][0]
     funcList = static_config["funcList"]
@@ -157,7 +158,11 @@ def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_
     dictOp = static_config["dictOp"]
 
     if encode == 'float':
-        print("[INFO] Using float encoding method!")
+        if log:
+            log.info("[INFO] Using float encoding method!")
+        else:
+            print("[INFO] Using float encoding method!")
+        
         inline = params['inline']
         balance = params['balance']
         factor = params['factor']
@@ -168,7 +173,7 @@ def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_
         stltc = params['stltc']
         opltc = params['opltc']
         state = params['state']
-
+        
         # Convert numerical values to actual options
         for key in paraDict:
             name = key.split('_')[0]
@@ -294,7 +299,10 @@ def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_
                 paraDict[key] = opltc[idx]
 
     else:
-        print("[INFO] Using discrete encoding method!")
+        if log:
+            log.info("[INFO] Using discrete encoding method!")
+        else:
+            print("[INFO] Using discrete encoding method!")
 
     # Fill the blanks in dir.json and generate dir.tcl for HLS
     print("[INFO] Generating Vitis HLS directive.tcl file...")
@@ -470,4 +478,7 @@ def genDirConfig(encode, params, static_config, paraDict, dir_tcl, tempDir, dir_
     with open(dir_json, "w") as fout:
         fout.write(json.dumps(tempDir, indent=4))
 
-    print("[INFO] Successfully generated Vitis HLS directive.tcl and hls.tcl files !")
+    if log:
+        log.info("[INFO] Successfully generated Vitis HLS directive.tcl and hls.tcl files !")
+    else:
+        print("[INFO] Successfully generated Vitis HLS directive.tcl and hls.tcl files !")

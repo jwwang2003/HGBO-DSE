@@ -29,7 +29,7 @@ from optuna.study._study_direction import StudyDirection
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
 
-from lhs_sampler import LatinHypercubeSampler
+from .lhs_sampler import LatinHypercubeSampler
 import numpy as np
 
 

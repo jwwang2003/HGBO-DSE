@@ -16,7 +16,7 @@ index = 9
 name = nameList[index]
 bench = folderList[index]
 
-root = os.path.abspath('../dse_ds/MachSuite')
+root = os.path.abspath('./dse_ds/MachSuite')
 
 path_sa = os.path.join(root, 'sa_ds')
 path_ga = os.path.join(root, 'nsga_ds')

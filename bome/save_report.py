@@ -1,7 +1,7 @@
 import os
 import glob
 import shutil
-from common import createFolder
+from bome.common import createFolder
 
 
 def get_adb_rpt_verilog(case, top, alg, ori_prj_path, dataset_path, iterNum, process, mode):

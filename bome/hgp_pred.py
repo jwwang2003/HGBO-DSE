@@ -1,11 +1,11 @@
 import os
-from pred.pred_lut import lut_pred
-from pred.pred_ff import ff_pred
-from pred.pred_dsp import dsp_pred
-from pred.pred_bram import bram_pred
-from pred.pred_cp import cp_pred
-from pred.pred_pwr import pwr_pred
-from pred.df_construct import *
+from bome.pred.pred_lut import lut_pred
+from bome.pred.pred_ff import ff_pred
+from bome.pred.pred_dsp import dsp_pred
+from bome.pred.pred_bram import bram_pred
+from bome.pred.pred_cp import cp_pred
+from bome.pred.pred_pwr import pwr_pred
+from bome.pred.df_construct import *
 
 top_list = ['aes256_encrypt_ecb', 'bfs', 'fft', 'gemm', 'md_kernel', 'needwun', 'ss_sort', 'ellpack',
             'stencil3d', 'viterbi']

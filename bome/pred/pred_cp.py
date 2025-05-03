@@ -7,7 +7,7 @@ from .net import HierNet
 def cp_pred(data):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data.to(device)
-    model_path = os.path.abspath('../hgp/model/cp_mean_h64_d0_checkpoint_test.pt')
+    model_path = os.path.abspath('./hgp/model/cp_mean_h64_d0_checkpoint_test.pt')
     model = HierNet(in_channels=11, hidden_channels=64, num_layers=3, conv_type='sage',
                     hls_dim=1, drop_out=0.0)
     model.load_state_dict(torch.load(model_path, map_location="cuda")['model'], strict=False)

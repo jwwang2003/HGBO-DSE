@@ -1,6 +1,7 @@
 import os
+from logging import Logger
 import numpy as np
-from parse_xml import *
+from bome.parse_xml import *
 
 
 # Constant
@@ -14,8 +15,7 @@ WDSP: float = 0.3
 WBRAM: float = 0.05
 
 
-def getHLS(params, rpt_list):
-
+def getHLS(params, rpt_list, log: Logger):
     fail_flag = False
     dictPPA = {}
     hls_rpt = rpt_list[0]
@@ -24,7 +24,7 @@ def getHLS(params, rpt_list):
     LATENCY = F4
     dictLatency = {}
     if os.path.exists(hls_xml):
-        print("[INFO] Reading Latency Information...")
+        log.info("[INFO] Reading Latency Information...")
         xml_parser = read_xml(hls_xml)
         root = get_xml_root(xml_parser)
         perf_info = find_first_node(root, 'PerformanceEstimates')
@@ -50,7 +50,7 @@ def getHLS(params, rpt_list):
     LUT = FF = DSP = BRAM = URAM = F1
     CP = F2
     if os.path.exists(hls_rpt):
-        print("[INFO] Reading HLS Prediction report...")
+        log.info("[INFO] Reading HLS Prediction report...")
         f_hls = open(hls_rpt, 'r')
         for line in f_hls.readlines():
             if line.startswith('|Total'):
@@ -64,11 +64,11 @@ def getHLS(params, rpt_list):
                 res = [i for i in line.split()]
                 CP = float(res[-4])
     else:
-        print("[INFO] HLS Flow Faild !")
+        log.info("[INFO] HLS Flow Faild !")
         fail_flag = True
     dictPPA['HLS'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'CP': CP}
-    print("HLS Prediction Results:")
-    print("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, CP))
+    log.info("HLS Prediction Results:")
+    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, CP))
 
     return dictPPA, fail_flag
 
@@ -86,7 +86,7 @@ def getPPA(params, rpt_list):
     LATENCY = F4
     dictLatency = {}
     if os.path.exists(hls_xml):
-        print("[INFO] Reading Latency Information...")
+        log.info("[INFO] Reading Latency Information...")
         xml_parser = read_xml(hls_xml)
         root = get_xml_root(xml_parser)
         perf_info = find_first_node(root, 'PerformanceEstimates')
@@ -108,12 +108,12 @@ def getPPA(params, rpt_list):
         dictLatency['Latency'] = LATENCY  # HLS process failed
 
     dictPPA['LATENCY'] = dictLatency
-    print(dictLatency)
+    log.info(dictLatency)
 
     LUT = FF = DSP = BRAM = URAM = F1
     CP = F2
     if os.path.exists(hls_rpt):
-        print("[INFO] Reading HLS Prediction report...")
+        log.info("[INFO] Reading HLS Prediction report...")
         f_hls = open(hls_rpt, 'r')
         for line in f_hls.readlines():
             if line.startswith('|Total'):
@@ -127,16 +127,16 @@ def getPPA(params, rpt_list):
                 res = [i for i in line.split()]
                 CP = float(res[-4])
     else:
-        print("[INFO] HLS Flow Faild !")
+        log.info("[INFO] HLS Flow Faild !")
         fail_flag = True
     dictPPA['HLS'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'CP': CP}
-    print("HLS Prediction Results:")
-    print("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, CP))
+    log.info("HLS Prediction Results:")
+    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, CP))
 
     LUT = FF = DSP = BRAM = URAM = SRL = F1
     CP = F2
     if os.path.exists(syn_rpt):
-        print("[INFO] Reading RTL Synthesis report...")
+        log.info("[INFO] Reading RTL Synthesis report...")
         f_syn = open(syn_rpt, 'r')
         for line in f_syn.readlines():
             res = [i for i in line.split() if i.isdigit()]
@@ -157,17 +157,17 @@ def getPPA(params, rpt_list):
                 res = [i for i in line.split()]
                 CP = float(res[-2])
     else:
-        print("[INFO] Synthesis Flow Faild !")
+        log.info("[INFO] Synthesis Flow Faild !")
         fail_flag = True
     dictPPA['SYN'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'SRL': SRL, 'CP': CP}
-    print("RTL Synthesis Results:")
-    print("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, SRL, CP))
+    log.info("RTL Synthesis Results:")
+    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f" % (LUT, FF, DSP, BRAM, URAM, SRL, CP))
 
     LUT = FF = DSP = BRAM = URAM = SRL = F1
     CP = F2
     PWR = F3
     if os.path.exists(impl_rpt):
-        print("[INFO] Reading post-implementation report...")
+        log.info("[INFO] Reading post-implementation report...")
         f_impl = open(impl_rpt, 'r')
         for line in f_impl.readlines():
             res = [i for i in line.split() if i.isdigit()]
@@ -194,11 +194,11 @@ def getPPA(params, rpt_list):
                 PWR = float(res[-2])
                 break
     else:
-        print("Implementation Flow Failed !")
+        log.info("Implementation Flow Failed !")
         fail_flag = True
     dictPPA['IMPL'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'SRL': SRL, 'CP': CP, 'PWR': PWR}
-    print("Post-Implementation Results:")
-    print("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f, PWR = %f" % (LUT, FF, DSP, BRAM, URAM,
+    log.info("Post-Implementation Results:")
+    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f, PWR = %f" % (LUT, FF, DSP, BRAM, URAM,
                                                                                               SRL, CP, PWR))
     return dictPPA, fail_flag
 
