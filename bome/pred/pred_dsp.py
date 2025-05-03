@@ -13,7 +13,6 @@ from torch_geometric.nn.pool import SAGPooling, global_add_pool, global_max_pool
 # Flag for enabling Jumping Knowledge
 jknFlag: bool = False
 
-
 class HierNet(torch.nn.Module):
     def __init__(
         self,
