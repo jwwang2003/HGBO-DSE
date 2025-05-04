@@ -2,6 +2,8 @@
 Celery entry point of backend inference server
 (note that this is just the celery instance, not the full backend)
 
+This file was mainly created for experimental purposes
+
 > celery -A backend.main worker --loglevel=DEBUG
 """
 

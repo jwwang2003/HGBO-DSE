@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 import shutil
 
 class TempFolderManager:
-    def __init__(self, base_dir, history_duration_minutes=60):
+    def __init__(self, base_dir, history_duration_minutes=1):
         self.base_dir = base_dir
         self.history_duration = timedelta(minutes=history_duration_minutes)
         self.history_file = "folder_history.txt"  # Store folder history
@@ -96,3 +96,16 @@ class TempFolderManager:
                     print(f"Deleted folder: {folder_path}")
                 del self.history[folder]  # Remove from history
         self.save_history()
+
+
+if __name__ == "__main__":
+    manager = TempFolderManager("./test")
+    # path = manager.create_temp_folder()
+    # print(path)
+    # manager.save_history()
+    
+    manager.clean_old_folders()
+    
+    # new_manager = TempFolderManager("./test")
+    # new_manager.load_history()
+    # print(new_manager.history)

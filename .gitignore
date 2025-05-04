@@ -7,3 +7,5 @@ bome/*.db
 vitis_hls.log
 
 temp/*
+
+.env

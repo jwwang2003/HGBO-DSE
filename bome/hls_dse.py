@@ -16,6 +16,14 @@ from bome.vitis_hls import VitisHLSRunner
 
 noLatList = ['bfs', 'fft', 'nw', 'stencil']
 
+supported = {
+    "mode": ["hgp", "impl"],
+    "alg": ["sa", "motpe_d", "motpe_f", "motpe_fl", "nsga", "random"],
+    "device": ["xc7vx485tffg1761-2"],
+    "encode": ["float", "discrete"],
+    "space": ["homo", "tree"],
+}
+
 class IterationCallback:
     def __init__(self, log: Logger):
         self.caseNumber = 0
