@@ -1,8 +1,8 @@
 import os
 from logging import Logger
 import numpy as np
+from dataclasses import dataclass
 from bome.parse_xml import *
-
 
 # Constant
 F1: float = 1e8
@@ -14,6 +14,28 @@ WFF: float = 0.25
 WDSP: float = 0.3
 WBRAM: float = 0.05
 
+# Weights (constant)
+@dataclass(frozen=True)
+class Weights:
+    F1:     float = 1e8
+    F2:     float = 1e8
+    F3:     float = 1e8
+    F4:     float = 1e8
+    WLUT:   float = 0.3
+    WFF:    float = 0.25
+    WDSP:   float = 0.3
+    WBRAM:  float = 0.05
+
+@dataclass
+class StagePPA:
+    LUT:    int                         # LUT: Look-up tables
+    FF:     int                         # FF: Flip-flops
+    DSP:    int                         # DSP: Digital signal processors
+    BRAM:   int                         # Block RAM
+    URAM:   int                         # Ultra RAM
+    SRL:    int     = 0                 # SRL: Shift-register LUT
+    CP:     float   = float('inf')      # CP: Clock period
+    PWR:    float   = 0.0               # PWR: Power consumption?
 
 def getHLS(params, rpt_list, log: Logger):
     fail_flag = False

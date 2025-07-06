@@ -26,8 +26,9 @@ def ff_pred(data: Data) -> int:
     data = data.to(device)
 
     # locate the checkpoint file reliably
-    model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
-    model_path = os.path.abspath(os.path.join(model_dir, 'ff_h64_d0_checkpoint_test.pt'))
+    # model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
+    # model_path = os.path.abspath(os.path.join(model_dir, 'ff_h64_d0_checkpoint_test.pt'))
+    model_path = os.path.abspath(os.path.join(os.curdir, 'hgp', 'model', 'ff_h64_d0_checkpoint_test.pt'))
 
     # build & move model
     model: HierNet = HierNet(

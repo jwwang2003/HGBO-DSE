@@ -39,7 +39,7 @@ API ticket parameters:
 - Files
     - C files
     - config.yaml
-    - param.yamlw
+    - param.yaml
 - mode
 - bench (auto-defiend as "remote")
 - case  (project name)

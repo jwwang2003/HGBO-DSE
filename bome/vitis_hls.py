@@ -18,10 +18,8 @@ class VitisHLSRunner:
         if self.context and not os.path.exists(self.context):
             os.makedirs(self.context)
         
-        name = context.split("/")[-1]
-        
         # Set up logger with detailed formatting and context-specific log file
-        self.log = setup_logger(context=f"vitis_hls_{name}", log_dir=context)
+        self.log = setup_logger(context=f"{context}_vitis_hls")
 
     def run(self):
         """
@@ -54,7 +52,8 @@ class VitisHLSRunner:
                     shell=True,
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout
+                    timeout=self.timeout,
+                    cwd=os.path.join("./", self.context)
                 )
                 self.stdout = self.process.stdout
                 self.stderr = self.process.stderr

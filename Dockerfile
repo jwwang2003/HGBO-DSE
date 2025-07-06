@@ -1,32 +1,31 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-bookworm
+# Dockerfile
+FROM python:3.9-slim
 
-# Set the working directory inside the container
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Install required system dependencies for shell access and any other needed tools
-# RUN apt-get update && apt-get install -y \
-#     bash \
-#     curl \
-#     vim \
-#     git \
-#     && rm -rf /var/lib/apt/lists/*
+# Install system dependencies
+RUN apt-get update \
+    && apt-get install -y graphviz \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the current directory contents into the container at /usr/src/app
-COPY . .
+# Mount your Vivado/Vitis installation into container at /tools/xilinx
+# (e.g., with docker-compose: - /home/wjw/tools/xilinx:/tools/xilinx:ro)
+ENV XILINX_INSTALL=/tools/xilinx
+ENV PATH="${XILINX_INSTALL}/Vitis/2021.2/bin:${PATH}"
 
-# Install the Python dependencies
+# Install PyTorch CPU wheels
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining Python dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Set environment variables (if any required by your project)
-# ENV VAR_NAME=value
+# Copy application code
+COPY . .
 
-# Expose the port the app runs on
-EXPOSE 5000
+# Expose API port
+EXPOSE 8000
 
-# Make sure the shell features (e.g., bash) are available
-CMD ["bash"]
+# Dummy entrypoint for verification\ENTRYPOINT ["echo", "Dummy entrypoint: container is up"]
 
-ENV PATH=/opt/Xilinx/Vitis_HLS/2022.1/bin:$PATH
-
-ENTRYPOINT ["python", "-m", "backend.server"]
+CMD ["echo", "Dummy entrypoint: container is up"]

@@ -23,8 +23,8 @@ def bram_pred(data: Data) -> int:
     data = data.to(device)
 
     # locate model checkpoint
-    model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
-    model_path = os.path.abspath(os.path.join(model_dir, 'bram_mae_h64_d0_checkpoint_test.pt'))
+    # model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
+    model_path = os.path.abspath(os.path.join(os.curdir, 'hgp', 'model', 'bram_mae_h64_d0_checkpoint_test.pt'))
 
     # build & load model
     model: HierNet = HierNet(

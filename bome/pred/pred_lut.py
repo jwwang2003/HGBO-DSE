@@ -25,7 +25,8 @@ def lut_pred(data: Data) -> int:
     # locate checkpoint file
     # model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
     # model_path = os.path.abspath(os.path.join(model_dir, 'lut_h64_d0_checkpoint_test.pt'))
-    model_path = os.path.abspath("../hgp/model/lut_h64_d0_checkpoint_test.pt")
+    # model_path = os.path.abspath("../hgp/model/lut_h64_d0_checkpoint_test.pt")
+    model_path = os.path.abspath(os.path.join(os.curdir, 'hgp', 'model', 'lut_h64_d0_checkpoint_test.pt'))
     
     # build & move model
     model: HierNet = HierNet(

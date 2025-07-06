@@ -5,7 +5,9 @@ from logging import Logger
 from bome.log import setup_logger
 from bome.common import *
 
+from helpers.context import with_context, get_context_id
 
+@with_context
 class HLSBasic(object):
     def __init__(
         self,
@@ -53,14 +55,17 @@ class HLSBasic(object):
         self.log = log
         self.isolated = isolated  # New isolated folder parameter
         self.isolated_folder_path = None
+        self.context: str = None
 
         # Initialization
         if self.isolated:
             self.create_isolated_folder()  # Create isolated folder if specified
-
+        
+        if not self.context:
+            self.context = get_context_id()
+        
         if not self.log:
-            name = self.get_cwd().split("/")[-1]
-            self.log = setup_logger(f"hls_dse_{name}", self.get_cwd(), logging.DEBUG)
+            self.log = setup_logger(context=self.context)
         
         self.get_config_path()
         self.get_params_path()

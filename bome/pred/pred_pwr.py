@@ -26,8 +26,9 @@ def pwr_pred(data: Data) -> float:
     data = data.to(device)
 
     # locate checkpoint file
-    model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
-    model_path = os.path.abspath(os.path.join(model_dir, 'power_mean_h64_d0_checkpoint_test.pt'))
+    # model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
+    # model_path = os.path.abspath(os.path.join(model_dir, 'power_mean_h64_d0_checkpoint_test.pt'))
+    model_path = os.path.abspath(os.path.join(os.curdir, 'hgp', 'model', 'power_mean_h64_d0_checkpoint_test.pt'))
 
     # build & move model
     model: HierNet = HierNet(

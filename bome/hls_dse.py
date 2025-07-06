@@ -3,6 +3,8 @@ import argparse
 import pyDOE
 from functools import partial
 
+from helpers.context import get_context_id, with_context
+
 from bome.alg.sa_sampler import SimulatedAnnealingSampler
 from bome.hls_basic import HLSBasic
 from bome.tdm.gen_config import *
@@ -75,7 +77,7 @@ def objective(trial, basic: HLSBasic):
         
         hls_runner = VitisHLSRunner(
             tcl_script=hls_tcl,
-            context=basic.get_cwd(),
+            context=f"{basic.context}_vitis_hls",
             check=False
         )
         hls_runner.run()
@@ -94,7 +96,7 @@ def objective(trial, basic: HLSBasic):
         
         hls_runner = VitisHLSRunner(
             tcl_script=hls_tcl,
-            context=basic.get_cwd(),
+            context=f"{basic.context}_vitis_hls",
             check=False
         )
         hls_runner.run()
@@ -121,7 +123,6 @@ def objective(trial, basic: HLSBasic):
             ppa = [npower, nlat, ncp, narea]
 
     return ppa
-
 
 def runDSE(basic: HLSBasic, progress_callback=None):
     case = basic.case

@@ -107,8 +107,9 @@ def dsp_pred(data: Data) -> int:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # load and build model
-    model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
-    model_path = os.path.abspath(os.path.join(model_dir, 'dsp_mae_h64_d0_checkpoint_test.pt'))
+    # model_dir = os.path.join(os.path.dirname(__file__), '..', 'hgp', 'model')
+    # model_path = os.path.abspath(os.path.join(model_dir, 'dsp_mae_h64_d0_checkpoint_test.pt'))
+    model_path = os.path.abspath(os.path.join(os.curdir, 'hgp', 'model', 'dsp_mae_h64_d0_checkpoint_test.pt'))
 
     model = HierNet(
         in_channels=15,
