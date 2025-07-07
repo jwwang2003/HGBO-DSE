@@ -1,0 +1,131 @@
+<!-- static/admin.html -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>API Key Manager</title>
+  <style>
+    body { font-family: sans-serif; max-width: 900px; margin: 2em auto; }
+    button { margin: .3em .2em; padding: .4em .8em; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+    th, td { border: 1px solid #ccc; padding: .5em; text-align: left; }
+    code { background: #f4f4f4; padding: .2em .4em; display: inline-block; }
+  </style>
+</head>
+<body>
+  <h1>API Key Manager</h1>
+  <p>You’ll be prompted once for admin credentials.</p>
+  <button id="refresh">Refresh Keys</button>
+  <button id="create">Create Key</button>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Key</th>
+        <th>Created At (UTC)</th>
+        <th>Expires At (UTC)</th>
+        <th>Memo</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="keys"></tbody>
+  </table>
+
+  <script>
+    const user = prompt("Admin username:", "");
+    const pass = prompt("Admin password:", "");
+    const auth = "Basic " + btoa(user + ":" + pass);
+
+    async function fetchKeys() {
+      const res = await fetch("/admin/keys", {
+        headers: { "Authorization": auth }
+      });
+      if (!res.ok) return alert("Error fetching keys: " + res.status);
+      const data = await res.json();
+      const tbody = document.getElementById("keys");
+      tbody.innerHTML = "";
+      data.forEach(k => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><code>${k.key}</code></td>
+          <td>${new Date(k.created_at).toISOString()}</td>
+          <td>${new Date(k.expires_at).toISOString()}</td>
+          <td class="memo">${k.memo||""}</td>
+          <td>
+            <button class="edit"   data-key="${k.key}">Edit Memo</button>
+            <button class="revoke" data-key="${k.key}">Revoke</button>
+            <button class="refresh" data-key="${k.key}">Refresh</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      // handlers
+      document.querySelectorAll(".edit").forEach(btn => {
+        btn.onclick = async () => {
+          const row = btn.closest("tr");
+          const old = row.querySelector(".memo").textContent;
+          const m = prompt("New memo:", old);
+          if (m===null) return;
+          await fetch(`/admin/keys/${btn.dataset.key}/memo`, {
+            method: "PATCH",
+            headers:{
+              "Authorization": auth,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ memo: m })
+          });
+          fetchKeys();
+        };
+      });
+      document.querySelectorAll(".revoke").forEach(btn => {
+        btn.onclick = async () => {
+          if (!confirm("Revoke this key now?")) return;
+          await fetch(`/admin/keys/${btn.dataset.key}/revoke`, {
+            method: "PATCH",
+            headers: { "Authorization": auth }
+          });
+          fetchKeys();
+        };
+      });
+      document.querySelectorAll(".refresh").forEach(btn => {
+        btn.onclick = async () => {
+          const d = prompt("Days to extend expiry by:", "30");
+          if (d===null) return;
+          await fetch(`/admin/keys/${btn.dataset.key}/refresh?days=${encodeURIComponent(d)}`, {
+            method: "PATCH",
+            headers: { "Authorization": auth }
+          });
+          fetchKeys();
+        };
+      });
+    }
+
+    async function createKey() {
+      const memo = prompt("Memo (optional):", "");
+      const days = prompt("Expire in how many days?", "30");
+      const res = await fetch("/admin/keys", {
+        method: "POST",
+        headers:{
+          "Authorization": auth,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          memo: memo||null,
+          expire_days: parseInt(days,10)||30
+        })
+      });
+      if (!res.ok) return alert("Error creating key: " + res.status);
+      const k = await res.json();
+      alert("Key created:\n" + k.key);
+      fetchKeys();
+    }
+
+    document.getElementById("refresh").onclick = fetchKeys;
+    document.getElementById("create").onclick  = createKey;
+    fetchKeys();
+  </script>
+</body>
+</html>

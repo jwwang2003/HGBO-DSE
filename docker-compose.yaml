@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  celery:
+    build: .
+    command: "celery -A backend.celery worker --loglevel=info"  # Celery command to start the worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0  # Redis URL
+    depends_on:
+      - redis
+    networks:
+      - backend_network
+
+  gunicorn:
+    build: .
+    command: "gunicorn -k uvicorn.workers.UvicornWorker backend.entry:app"
+    ports:
+      - "8000:8000"  # Expose port 8000 for Gunicorn server
+    depends_on:
+      - redis
+    networks:
+      - backend_network
+
+  redis:
+    image: redis:alpine
+    networks:
+      - backend_network
+
+networks:
+  backend_network:
+    driver: bridge
