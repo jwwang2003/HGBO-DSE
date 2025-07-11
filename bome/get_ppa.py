@@ -95,8 +95,7 @@ def getHLS(params, rpt_list, log: Logger):
     return dictPPA, fail_flag
 
 
-def getPPA(params, rpt_list):
-
+def getPPA(params, rpt_list, log: Logger):
     fail_flag = False
     dictPPA = {}
     hls_rpt = rpt_list[0]
@@ -220,8 +219,8 @@ def getPPA(params, rpt_list):
         fail_flag = True
     dictPPA['IMPL'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'SRL': SRL, 'CP': CP, 'PWR': PWR}
     log.info("Post-Implementation Results:")
-    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f, PWR = %f" % (LUT, FF, DSP, BRAM, URAM,
-                                                                                              SRL, CP, PWR))
+    log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f, PWR = %f" % \
+        (LUT, FF, DSP, BRAM, URAM, SRL, CP, PWR))
     return dictPPA, fail_flag
 
 

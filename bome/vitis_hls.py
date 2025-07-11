@@ -19,7 +19,7 @@ class VitisHLSRunner:
             os.makedirs(self.context)
         
         # Set up logger with detailed formatting and context-specific log file
-        self.log = setup_logger(context=f"{context}_vitis_hls")
+        self.log = setup_logger(context=f"{context}")
 
     def run(self):
         """

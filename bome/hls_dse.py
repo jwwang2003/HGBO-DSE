@@ -3,8 +3,6 @@ import argparse
 import pyDOE
 from functools import partial
 
-from helpers.context import get_context_id, with_context
-
 from bome.alg.sa_sampler import SimulatedAnnealingSampler
 from bome.hls_basic import HLSBasic
 from bome.tdm.gen_config import *
@@ -15,6 +13,7 @@ from bome.save_report import *
 
 from bome.vitis_hls import VitisHLSRunner
 
+from helpers.optuna import get_opt_history_graphs, get_param_importance_graphs
 
 noLatList = ['bfs', 'fft', 'nw', 'stencil']
 
@@ -77,7 +76,7 @@ def objective(trial, basic: HLSBasic):
         
         hls_runner = VitisHLSRunner(
             tcl_script=hls_tcl,
-            context=f"{basic.context}_vitis_hls",
+            context=os.path.join(basic.isolated_folder_path or "./", f"{basic.context}_vitis_hls"),
             check=False
         )
         hls_runner.run()
@@ -96,15 +95,15 @@ def objective(trial, basic: HLSBasic):
         
         hls_runner = VitisHLSRunner(
             tcl_script=hls_tcl,
-            context=f"{basic.context}_vitis_hls",
+            context=os.path.join(basic.isolated_folder_path or "./", f"{basic.context}_vitis_hls"),
             check=False
         )
         hls_runner.run()
         
         log.info("Collecting adb files, hls/syn/impl report and Verilog files...")
         rpt_list, _ = get_adb_rpt_verilog(case, top, alg, ori_prj_path, dataset_path, iterNum, process, mode)
-        dictPPA, _ = getPPA(params, rpt_list)
-
+        dictPPA, _ = getPPA(params, rpt_list, log)
+        
     ppa_rpt = os.path.join(hls_script_path, "ppa_%d.json" % iterNum)
     with open(ppa_rpt, "w") as fout:
         fout.write(json.dumps(dictPPA, indent=4))
@@ -121,7 +120,7 @@ def objective(trial, basic: HLSBasic):
             ppa = npower + nlat + ncp + narea
         else:
             ppa = [npower, nlat, ncp, narea]
-
+    
     return ppa
 
 def runDSE(basic: HLSBasic, progress_callback=None):
@@ -182,20 +181,30 @@ def runDSE(basic: HLSBasic, progress_callback=None):
         if alg == 'motpe_d':
             basic.log.info("Using Discrete Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
-            sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
-                                                 seed=seed)
+            sampler = optuna.samplers.TPESampler(
+                n_startup_trials=n_startup_trials,
+                n_ei_candidates=n_ei_candidates,
+                seed=seed
+            )
         elif alg == "motpe_f":
             basic.log.info("Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
-            sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
-                                                 seed=seed)
+            sampler = optuna.samplers.TPESampler(
+                n_startup_trials=n_startup_trials,
+                n_ei_candidates=n_ei_candidates,
+                seed=seed
+            )
         elif alg == "motpe_fl":
             basic.log.info("Using Float Encoding and Latin MOTPE based Bayesian Optimization for HLS DSE")
             from bome.alg.tpe_sampler import TPESampler
             n_ei_candidates = 24
-            sampler = TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
-                                 seed=seed, init_method='lhs', 
-                                 init_params=init_params)
+            sampler = TPESampler(
+                n_startup_trials=n_startup_trials,
+                n_ei_candidates=n_ei_candidates,
+                seed=seed,
+                init_method='lhs', 
+                init_params=init_params
+            )
         elif alg == "nsga":
             basic.log.info("Using NSGA-II for HLS DSE")
             sampler = optuna.samplers.NSGAIISampler(seed=seed)
@@ -205,9 +214,12 @@ def runDSE(basic: HLSBasic, progress_callback=None):
         else:
             basic.log.info("Using Float Encoding and MOTPE based Bayesian Optimization for HLS DSE")
             n_ei_candidates = 24
-            sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, n_ei_candidates=n_ei_candidates,
-                                                 seed=seed)
-
+            sampler = optuna.samplers.TPESampler(
+                n_startup_trials=n_startup_trials,
+                n_ei_candidates=n_ei_candidates,
+                seed=seed
+            )
+        
         if case in noLatList:
             study = optuna.create_study(storage=storage, study_name=study_name, sampler=sampler,
                                         directions=["minimize", "minimize", "minimize"], load_if_exists=False)
@@ -265,7 +277,7 @@ def runDSE(basic: HLSBasic, progress_callback=None):
             basic.log.info(f"\tparams: {trial_with_smallest_area.params}")
             basic.log.info(f"\tvalues: {trial_with_smallest_area.values}")
             
-            if isolated_path == "":
+            if not isolated_path or isolated_path == "":
                 fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
                                                                         target_name="power")
                 fig_cp_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
@@ -285,6 +297,24 @@ def runDSE(basic: HLSBasic, progress_callback=None):
                 fig_pwr_i.show()
                 fig_cp_i.show()
                 fig_area_i.show()
+            else:
+                ctx = basic.isolated_folder_path
+                opt_his = get_opt_history_graphs(
+                study=study, metrics=["power", "cp", "area"]
+                )
+                for name, fig in opt_his.items():
+                    out_path = os.path.join(ctx, f"opt_history_{name}.svg")
+                    fig.write_image(out_path)
+                    print(f"Saved optimization history for {name} at {out_path}")
+
+                # 2) Export parameter-importance plots
+                param_imp = get_param_importance_graphs(
+                    study=study, metrics=["power", "cp", "area"]
+                )
+                for name, fig in param_imp.items():
+                    out_path = os.path.join(ctx, f"param_importance_{name}.svg")
+                    fig.write_image(out_path)
+                    print(f"Saved parameter importance for {name} at {out_path}")
         else:
             trial_with_lowest_power = min(study.best_trials, key=lambda t: t.values[0])
             basic.log.info(f"Trial with lowest power: ")
@@ -310,7 +340,7 @@ def runDSE(basic: HLSBasic, progress_callback=None):
             basic.log.info(f"\tparams: {trial_with_smallest_area.params}")
             basic.log.info(f"\tvalues: {trial_with_smallest_area.values}")
 
-            if isolated_path == "":
+            if not isolated_path or isolated_path == "":
                 fig_pwr_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[0],
                                                                         target_name="power")
                 fig_lat_h = optuna.visualization.plot_optimization_history(study, target=lambda t: t.values[1],
@@ -336,6 +366,24 @@ def runDSE(basic: HLSBasic, progress_callback=None):
                 fig_lat_i.show()
                 fig_cp_i.show()
                 fig_area_i.show()
+            else:
+                ctx = basic.isolated_folder_path
+                opt_his = get_opt_history_graphs(
+                study=study, metrics=["power", "lat", "cp", "area"]
+                )
+                for name, fig in opt_his.items():
+                    out_path = os.path.join(ctx, f"opt_history_{name}.svg")
+                    fig.write_image(out_path)
+                    print(f"Saved optimization history for {name} at {out_path}")
+
+                # 2) Export parameter-importance plots
+                param_imp = get_param_importance_graphs(
+                    study=study, metrics=["power", "lat", "cp", "area"]
+                )
+                for name, fig in param_imp.items():
+                    out_path = os.path.join(ctx, f"param_importance_{name}.svg")
+                    fig.write_image(out_path)
+                    print(f"Saved parameter importance for {name} at {out_path}")
 
 
 if __name__ == "__main__":
@@ -352,7 +400,8 @@ if __name__ == "__main__":
     parser.add_argument("--space", type=str, help="Tree-structured or homo-structured design space.", default="tree")
     parser.add_argument("--parallel", type=bool, help="Using parallel running or not.", default=False)
     parser.add_argument("--process", type=int, help="The process number of current running.", default=1)
-
+    parser.add_argument("--isolated", type=str, help="Work in a isolated folder environemnt.", default=None)
+    
     args = parser.parse_args()
 
     mode = args.mode
@@ -361,14 +410,16 @@ if __name__ == "__main__":
     ver = args.ver
     num = args.num
     alg = args.alg
+    device = args.device
+    clk = args.clk
     encode = args.encode
     space = args.space
     parallel = args.parallel
     process = args.process
+    isolated = args.isolated
 
     root = os.path.abspath("./")
-    # basic = HLSBasic(root, mode, bench, case, "", encode, num, alg, space, parallel, process, isolated="id123456")
-    basic = HLSBasic(root, mode, bench, case, ver, encode, num, alg, space, parallel, process)
+    basic = HLSBasic(root, mode, bench, case, ver, encode, num, alg, space, parallel, process, device, clk, isolated=isolated)
     
     iterationCallback = IterationCallback(basic.log)
     runDSE(basic, iterationCallback)

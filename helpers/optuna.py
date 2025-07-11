@@ -17,44 +17,17 @@ def load_study(
     """
     Load an existing Optuna study (using a persistent storage backend),
     or create it if it doesn't exist.
-
-    Parameters
-    ----------
-    study_name : str, optional
-        Name of the Optuna study; overrides OPTUNA_STUDY_NAME.
-    storage_url : str, optional
-        Storage backend URL; overrides OPTUNA_STORAGE_URL.
-    direction : str, optional
-        "minimize" or "maximize"; overrides OPTUNA_DIRECTION.
-
-    Environment variables (used only if corresponding arg is None):
-      OPTUNA_STUDY_NAME    - default "default_study"
-      OPTUNA_STORAGE_URL   - default "sqlite:///optuna_studies.db"
-      OPTUNA_DIRECTION     - default "minimize"
-
-    Returns
-    -------
-    optuna.Study
-        The loaded or newly created study.
     """
-    
-    # 1) Determine study_name
     study_name = study_name or os.getenv("OPTUNA_STUDY_NAME", "default_study")
-
-    # 2) Determine storage_url
     storage_url = storage_url or os.getenv(
         "OPTUNA_STORAGE_URL", "sqlite:///optuna_studies.db"
     )
-
-    # 3) Determine direction
     direction = (direction or os.getenv("OPTUNA_DIRECTION", "minimize")).lower()
     if direction not in ("minimize", "maximize"):
         logger.warning(
             f"Invalid optimization direction {direction!r}; falling back to 'minimize'"
         )
         direction = "minimize"
-
-    # Try to load, else create
     try:
         study = optuna.load_study(study_name=study_name, storage=storage_url)
         logger.info(f"Loaded existing study '{study_name}' from {storage_url}")
@@ -64,32 +37,14 @@ def load_study(
             study_name=study_name, storage=storage_url, direction=direction
         )
         logger.info(f"Created study '{study_name}' with direction='{direction}'")
-
     return study
 
 def get_opt_history_graphs(
     study: optuna.Study,
     metrics: List[str] = None
 ) -> Dict[str, go.Figure]:
-    """
-    Generate optimization-history plots for each objective in a multi-objective study.
-
-    Parameters
-    ----------
-    study : optuna.Study
-        The Optuna Study instance to visualize.
-    metrics : list of str, optional
-        Names of each objective in the same order as trial.values.
-        Defaults to ["power", "cp", "area"].
-
-    Returns
-    -------
-    Dict[str, go.Figure]
-        A mapping from metric name to its plotly Figure.
-    """
     if metrics is None:
         metrics = ["power", "cp", "area"]
-
     figs: Dict[str, go.Figure] = {}
     for idx, name in enumerate(metrics):
         figs[name] = optuna.visualization.plot_optimization_history(
@@ -103,25 +58,8 @@ def get_param_importance_graphs(
     study: optuna.Study,
     metrics: List[str] = None
 ) -> Dict[str, go.Figure]:
-    """
-    Generate parameter-importance plots for each objective in a multi-objective study.
-
-    Parameters
-    ----------
-    study : optuna.Study
-        The Optuna Study instance to analyze.
-    metrics : list of str, optional
-        Names of each objective in the same order as trial.values.
-        Defaults to ["power", "cp", "area"].
-
-    Returns
-    -------
-    Dict[str, go.Figure]
-        A mapping from metric name to its plotly Figure showing parameter importances.
-    """
     if metrics is None:
         metrics = ["power", "cp", "area"]
-
     figs: Dict[str, go.Figure] = {}
     for idx, name in enumerate(metrics):
         figs[name] = optuna.visualization.plot_param_importances(
@@ -131,20 +69,37 @@ def get_param_importance_graphs(
         )
     return figs
 
-
 # DEMO
 @with_context
 def main():
-    print(get_context_id())
-    loaded_study = load_study(study_name="bfs_motpe_fl_dse", storage_url="sqlite:///bfs_motpe_fl_dse.db")
-    print(loaded_study)
-    # print(loaded_study.trials)
-    
-    opt_his_figs = get_opt_history_graphs(study=loaded_study)
-    
-    for (name, fig) in opt_his_figs.items():
-        fig.write_image(name + ".svg")
-        print(name)
+    # Retrieve or create the study
+    # ctx = get_context_id()
+    ctx = "context"
+    study = load_study(
+        study_name="bfs_motpe_fl_dse",
+        storage_url="sqlite:///bfs_motpe_fl_dse.db",
+    )
+
+    # Ensure a folder for this context
+    os.makedirs(ctx, exist_ok=True)
+
+    # 1) Export optimization-history plots
+    opt_his = get_opt_history_graphs(
+        study=study, metrics=["power", "cp", "area"]
+    )
+    for name, fig in opt_his.items():
+        out_path = os.path.join(ctx, f"opt_history_{name}.svg")
+        fig.write_image(out_path)
+        print(f"Saved optimization history for {name} at {out_path}")
+
+    # 2) Export parameter-importance plots
+    param_imp = get_param_importance_graphs(
+        study=study, metrics=["power", "cp", "area"]
+    )
+    for name, fig in param_imp.items():
+        out_path = os.path.join(ctx, f"param_importance_{name}.svg")
+        fig.write_image(out_path)
+        print(f"Saved parameter importance for {name} at {out_path}")
 
 if __name__ == "__main__":
     main()

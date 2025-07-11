@@ -13,3 +13,7 @@ Run the following command in the root of the project directory to build the cont
 ```
 docker build -t <image-name> .
 ```
+
+```
+python -m bome.hls_dse --case viterbi --ver viterbi --num 10 --isolated context1
+```
