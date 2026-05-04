@@ -1,7 +1,10 @@
 import optuna
 import argparse
+import json
+import os
 import pyDOE
 from functools import partial
+from logging import Logger
 
 from bome.alg.sa_sampler import SimulatedAnnealingSampler
 from bome.hls_basic import HLSBasic
@@ -11,6 +14,7 @@ from bome.hgp_pred import *
 from bome.get_ppa import *
 from bome.save_report import *
 
+from bome.inference import dispatch_remote_inference, normalize_inference_mode
 from bome.vitis_hls import VitisHLSRunner
 
 from helpers.optuna import get_opt_history_graphs, get_param_importance_graphs
@@ -89,7 +93,11 @@ def objective(trial, basic: HLSBasic):
         else:
             dict_hls = dictPPA['HLS']
             hls_attr = list(dict_hls.values())
-            dictPPA['IMPL'] = getGNNPred(prj_path, hls_attr, case)
+            inference_mode = normalize_inference_mode(getattr(basic, "inference_mode", None))
+            if inference_mode == "remote":
+                dictPPA['IMPL'] = dispatch_remote_inference(prj_path, hls_attr, case)
+            else:
+                dictPPA['IMPL'] = getGNNPred(prj_path, hls_attr, case)
     else:
         basic.log.info("Running Vitis HLS and Vivado to get PPA...")
         
@@ -154,7 +162,7 @@ def runDSE(basic: HLSBasic, progress_callback=None):
         study_name = case + "_" + alg + "_dse"
         
     storage_path = os.path.join(
-        isolated_path if isolated_path else "", study_name + ".db"
+        basic.isolated_folder_path if isolated_path else "", study_name + ".db"
     )
     if parallel:
         # Important: must create the corresponding database in MySQL.
@@ -385,8 +393,7 @@ def runDSE(basic: HLSBasic, progress_callback=None):
                     fig.write_image(out_path)
                     print(f"Saved parameter importance for {name} at {out_path}")
 
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="HLS Design Space Exploration")
     parser.add_argument("--mode", type=str, help="The running mode of dse flow: hgp, impl.", default="hgp")
     parser.add_argument("--bench", type=str, help="The public benchmark name.", default="MachSuite")
@@ -401,6 +408,13 @@ if __name__ == "__main__":
     parser.add_argument("--parallel", type=bool, help="Using parallel running or not.", default=False)
     parser.add_argument("--process", type=int, help="The process number of current running.", default=1)
     parser.add_argument("--isolated", type=str, help="Work in a isolated folder environemnt.", default=None)
+    parser.add_argument(
+        "--inference-mode",
+        type=str,
+        choices=["host", "remote"],
+        default=os.getenv("HGBO_INFERENCE_MODE", "host"),
+        help="Run HGP model inference on the host or dispatch it to a Celery worker.",
+    )
     
     args = parser.parse_args()
 
@@ -417,11 +431,32 @@ if __name__ == "__main__":
     parallel = args.parallel
     process = args.process
     isolated = args.isolated
+    inference_mode = args.inference_mode
 
     root = os.path.abspath("./")
-    basic = HLSBasic(root, mode, bench, case, ver, encode, num, alg, space, parallel, process, device, clk, isolated=isolated)
+    basic = HLSBasic(
+        root,
+        mode,
+        bench,
+        case,
+        ver,
+        encode,
+        num,
+        alg,
+        space,
+        parallel,
+        process,
+        device,
+        clk,
+        isolated=isolated,
+        inference_mode=inference_mode,
+    )
     
     iterationCallback = IterationCallback(basic.log)
     runDSE(basic, iterationCallback)
 
     basic.log.info("HLS Design Space Exploration is Done!")
+
+
+if __name__ == "__main__":
+    main()

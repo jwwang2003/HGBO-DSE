@@ -1,5 +1,6 @@
 # Dockerfile
 FROM python:3.9-slim
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 RUN rm /bin/sh && ln -s /bin/bash /bin/sh
 
 WORKDIR /app
@@ -28,15 +29,13 @@ RUN apt-get install -y libstdc++6 dpkg-dev \
 ENV XILINX_INSTALL=/home/wjw/tools/xilinx
 # ENV PATH="${XILINX_INSTALL}/Vitis/2022.1/bin:${PATH}"
 
-# Install PyTorch CPU wheels
-RUN pip install --upgrade pip
-RUN pip install --trusted-host 192.168.139.1 --index-url http://192.168.139.1:5000/index/ \
-    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --extra-index-url https://download.pytorch.org/whl/cpu
-
-# Install remaining Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache --trusted-host 192.168.139.1 --index-url http://192.168.139.1:5000/index/ \
-    -r requirements.txt -f https://download.pytorch.org/whl/cpu
+# Install Python dependencies with uv.
+COPY pyproject.toml requirements.txt ./
+RUN uv pip install --system --requirement requirements.txt \
+    --index-url http://192.168.139.1:5000/index/ \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    --find-links https://download.pytorch.org/whl/cpu \
+    --allow-insecure-host 192.168.139.1
 
 # Copy application code
 COPY . .

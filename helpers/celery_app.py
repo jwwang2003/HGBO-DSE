@@ -1,4 +1,5 @@
 import logging
+import os
 from celery import Celery, Task
 from .context import set_context_id, clear_context_id, get_context_id
 
@@ -17,9 +18,10 @@ class ContextTask(Task):
 
 # adjust broker/backend URLs as needed:
 app = Celery(
-    'demo',
-    broker   = 'redis://localhost:6379/0',
-    backend  = 'redis://localhost:6379/0',
+    'hgbo_dse',
+    broker=os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0'),
+    backend=os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0'),
+    include=['backend.tasks'],
 )
 app.Task = ContextTask
 

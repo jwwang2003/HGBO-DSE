@@ -1,7 +1,7 @@
 # api_server.py
 
 import uuid
-import time
+import asyncio
 import secrets
 from datetime import datetime, timedelta
 import os
@@ -44,12 +44,19 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI()
 security = HTTPBasic()
 
-ADMIN_USER = "admin"
-ADMIN_PASS = "s3cr3t"
+ADMIN_USER_ENV = "HGBO_ADMIN_USER"
+ADMIN_PASS_ENV = "HGBO_ADMIN_PASS"
 
 def get_admin_creds(creds: HTTPBasicCredentials = Depends(security)):
-    if not (secrets.compare_digest(creds.username, ADMIN_USER)
-            and secrets.compare_digest(creds.password, ADMIN_PASS)):
+    admin_user = os.getenv(ADMIN_USER_ENV)
+    admin_pass = os.getenv(ADMIN_PASS_ENV)
+    if not admin_user or not admin_pass:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin credentials are not configured",
+        )
+    if not (secrets.compare_digest(creds.username, admin_user)
+            and secrets.compare_digest(creds.password, admin_pass)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid admin credentials",
@@ -266,14 +273,9 @@ async def websocket_endpoint(ws: WebSocket, task_id: str):
     except WebSocketDisconnect:
         manager.disconnect(task_id)
 
-def long_task(task_id: str, work_units: int):
-    import asyncio
+async def long_task(task_id: str, work_units: int):
     for i in range(1, work_units + 1):
-        time.sleep(1)
+        await asyncio.sleep(1)
         prog = f"{i}/{work_units}"
-        asyncio.get_event_loop().create_task(
-            manager.send_progress(task_id, prog)
-        )
-    asyncio.get_event_loop().create_task(
-        manager.send_progress(task_id, "done")
-    )
+        await manager.send_progress(task_id, prog)
+    await manager.send_progress(task_id, "done")

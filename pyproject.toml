@@ -1,0 +1,14 @@
+[project]
+name = "hgbo-dse"
+version = "0.1.0"
+description = "HGBO-DSE host DSE and optional remote inference tooling"
+requires-python = ">=3.9,<3.10"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

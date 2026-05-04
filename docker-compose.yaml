@@ -1,11 +1,14 @@
-version: '3.8'
-
 services:
   celery:
     build: .
-    command: "celery -A backend.celery worker --loglevel=info"  # Celery command to start the worker
+    working_dir: ${HGBO_SHARED_CONTAINER_ROOT:-/app}
+    command: "uv run celery -A helpers.celery_app:app worker --pool=threads --loglevel=info"
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0  # Redis URL
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - HGBO_SHARED_ROOT=${HGBO_SHARED_CONTAINER_ROOT:-/app}
+    volumes:
+      - ${HGBO_SHARED_HOST_ROOT:-.}:${HGBO_SHARED_CONTAINER_ROOT:-/app}
     depends_on:
       - redis
     networks:
@@ -13,9 +16,15 @@ services:
 
   gunicorn:
     build: .
-    command: "gunicorn -k uvicorn.workers.UvicornWorker backend.entry:app"
+    working_dir: ${HGBO_SHARED_CONTAINER_ROOT:-/app}
+    command: "uv run gunicorn --bind 0.0.0.0:8000 -k uvicorn.workers.UvicornWorker backend.entry:app"
+    environment:
+      - HGBO_ADMIN_USER=${HGBO_ADMIN_USER:-}
+      - HGBO_ADMIN_PASS=${HGBO_ADMIN_PASS:-}
     ports:
-      - "8000:8000"  # Expose port 8000 for Gunicorn server
+      - "8000:8000"
+    volumes:
+      - ${HGBO_SHARED_HOST_ROOT:-.}:${HGBO_SHARED_CONTAINER_ROOT:-/app}
     depends_on:
       - redis
     networks:

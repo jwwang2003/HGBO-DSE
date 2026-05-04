@@ -4,6 +4,7 @@ import logging
 from logging import Logger
 from bome.log import setup_logger
 from bome.common import *
+from bome.inference import normalize_inference_mode
 
 from helpers.context import with_context, get_context_id
 
@@ -25,7 +26,8 @@ class HLSBasic(object):
         device='xc7vx485tffg1761-2',
         clk='10',
         log: Logger=None,
-        isolated: str=None  # (optional) specifies a temporary directory for the working directory
+        isolated: str=None,  # (optional) specifies a temporary directory for the working directory
+        inference_mode: str=None,
     ):
         self.root = root
         self.mode = mode
@@ -54,6 +56,7 @@ class HLSBasic(object):
         self.paraDict = None
         self.log = log
         self.isolated = isolated  # New isolated folder parameter
+        self.inference_mode = normalize_inference_mode(inference_mode)
         self.isolated_folder_path = None
         self.context: str = None
 
@@ -86,8 +89,6 @@ class HLSBasic(object):
         createFolder(self.isolated_folder_path)
     
     def get_cwd(self):
-        if self.isolated:
-            return self.isolated_folder_path
         return self.root
 
     def get_config_path(self):
@@ -126,7 +127,7 @@ class HLSBasic(object):
 
     def get_ori_prj_path(self):
         self.ori_prj_path = os.path.join(
-            self.isolated_folder_path if self.isolated else os.path.join(self.root, 'benchmark'), 
+            os.path.join(self.root, 'benchmark'),
             self.bench,
             self.case
         )
