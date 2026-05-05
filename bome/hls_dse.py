@@ -434,6 +434,7 @@ def main():
     parser.add_argument("--config-path", type=str, help="Override config.yaml path for packaged Compass runs.", default=None)
     parser.add_argument("--params-path", type=str, help="Override params.yaml path for packaged Compass runs.", default=None)
     parser.add_argument("--project-path", type=str, help="Override benchmark project source path for packaged Compass runs.", default=None)
+    parser.add_argument("--source-file", type=str, help="Override C source filename used by generated HLS Tcl.", default=None)
     parser.add_argument(
         "--inference-mode",
         type=str,
@@ -461,6 +462,7 @@ def main():
     config_path = args.config_path
     params_path = args.params_path
     project_path = args.project_path
+    source_file = args.source_file
 
     root = os.path.abspath("./")
     basic = HLSBasic(
@@ -482,6 +484,7 @@ def main():
         config_path=config_path,
         params_path=params_path,
         project_path=project_path,
+        source_file=source_file,
     )
     
     iterationCallback = IterationCallback(basic.log)

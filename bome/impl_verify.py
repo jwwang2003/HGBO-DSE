@@ -259,6 +259,7 @@ def main():
     parser.add_argument("--config-path", type=str, default=None)
     parser.add_argument("--params-path", type=str, default=None)
     parser.add_argument("--project-path", type=str, default=None)
+    parser.add_argument("--source-file", type=str, default=None)
     parser.add_argument("--selection-path", type=str, required=True)
     parser.add_argument("--output-path", type=str, required=True)
     args = parser.parse_args()
@@ -284,6 +285,7 @@ def main():
         config_path=args.config_path,
         params_path=args.params_path,
         project_path=args.project_path,
+        source_file=args.source_file,
     )
 
     results = []

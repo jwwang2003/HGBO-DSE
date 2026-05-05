@@ -31,3 +31,35 @@ def test_compass_package_paths_override_hgbo_static_paths(tmp_path):
     assert Path(hls.get_ori_prj_path()) == (
         tmp_path / ".compass" / "hgbo-package" / "benchmark" / "MachSuite" / "bfs" / "bulk"
     )
+
+
+def test_hls_temp_script_uses_compass_source_file_override(tmp_path):
+    hls = make_hls_basic(tmp_path)
+    hls.hls_temp = str(tmp_path / "hls_temp.tcl")
+    hls.hls_script_path = str(tmp_path / "script")
+    hls.ori_prj_path = str(tmp_path / "benchmark" / "custom" / "bfs" / "bulk")
+    hls.top = "edge_detect"
+    hls.device = "xc7vx485tffg1761-2"
+    hls.clk = "10"
+    hls.source_file = "edge_detect.c"
+
+    hls.gen_hls_temp_script()
+
+    script = Path(hls.hls_temp).read_text()
+    assert "add_files edge_detect.c\n" in script
+    assert "add_files bfs.c\n" not in script
+
+
+def test_hls_temp_script_defaults_source_file_to_case_name(tmp_path):
+    hls = make_hls_basic(tmp_path)
+    hls.hls_temp = str(tmp_path / "hls_temp.tcl")
+    hls.hls_script_path = str(tmp_path / "script")
+    hls.ori_prj_path = str(tmp_path / "benchmark" / "custom" / "bfs" / "bulk")
+    hls.top = "bfs"
+    hls.device = "xc7vx485tffg1761-2"
+    hls.clk = "10"
+
+    hls.gen_hls_temp_script()
+
+    script = Path(hls.hls_temp).read_text()
+    assert "add_files bfs.c\n" in script

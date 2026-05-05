@@ -31,6 +31,7 @@ class HLSBasic(object):
         config_path: str=None,
         params_path: str=None,
         project_path: str=None,
+        source_file: str=None,
     ):
         self.root = root
         self.mode = mode
@@ -63,6 +64,7 @@ class HLSBasic(object):
         self.config_path_override = config_path
         self.params_path_override = params_path
         self.ori_prj_path_override = project_path
+        self.source_file = os.path.basename(source_file) if source_file else f"{case}.c"
         self.isolated_folder_path = None
         self.context: str = None
 
@@ -89,6 +91,7 @@ class HLSBasic(object):
         self.log.info("[Compass] Using config.yaml: {}".format(self.config_path))
         self.log.info("[Compass] Using params.yaml: {}".format(self.params_path))
         self.log.info("[Compass] Using HLS project path: {}".format(self.ori_prj_path))
+        self.log.info("[Compass] Using HLS source file: {}".format(self.get_source_file()))
         self.log.info("[Compass] DSE options: mode={}, bench={}, case={}, ver={}, alg={}, num={}, encode={}, space={}, inference_mode={}".format(
             self.mode,
             self.bench,
@@ -224,7 +227,7 @@ class HLSBasic(object):
             fw.write('open_project {}_{}_prj_p{}\n'.format(self.case, self.mode, str(self.process)))
         else:
             fw.write('open_project {}_{}_prj_p{}\n'.format(self.case, self.alg, str(self.process)))
-        fw.write('add_files {}.c\n'.format(self.case))
+        fw.write('add_files {}\n'.format(self.get_source_file()))
         if self.bench == 'MachSuite':
             fw.write('add_files local_support.c\n')
         elif self.bench == 'Polybench':
@@ -412,3 +415,9 @@ class HLSBasic(object):
         self.tempDir = tempDir
         self.paraDict = paraDict
         return self.top, self.tempDir, self.paraDict
+
+    def get_source_file(self):
+        source_file = getattr(self, "source_file", None)
+        if source_file:
+            return os.path.basename(source_file)
+        return f"{self.case}.c"
