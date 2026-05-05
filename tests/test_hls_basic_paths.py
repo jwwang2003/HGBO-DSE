@@ -4,7 +4,7 @@ from bome.hls_basic import HLSBasic
 
 
 def make_basic(root, isolated=None):
-    hls_basic_cls = HLSBasic.__wrapped__
+    hls_basic_cls = getattr(HLSBasic, "__wrapped__", HLSBasic)
     basic = hls_basic_cls.__new__(hls_basic_cls)
     basic.root = str(root)
     basic.mode = "hgp"

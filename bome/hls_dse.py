@@ -45,10 +45,10 @@ def parse_bool(value):
 
 
 def build_storage_url(study_name, parallel, isolated_folder_path=None, isolated=None):
+    if parallel:
+        return "mysql+pymysql://root:password@localhost/" + study_name
     artifact_folder = isolated_folder_path if isolated else ""
     storage_path = os.path.join(artifact_folder, study_name + ".db")
-    if parallel:
-        return "mysql+pymysql://root:password@localhost/" + storage_path
     return "sqlite:///" + storage_path
 
 class IterationCallback:

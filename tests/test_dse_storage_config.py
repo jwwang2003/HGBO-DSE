@@ -31,3 +31,15 @@ def test_non_parallel_storage_uses_sqlite_db_in_artifact_folder(tmp_path):
 
     assert storage == f"sqlite:///{tmp_path}/artifacts/bfs_motpe_fl_dse.db"
     assert "mysql" not in storage
+
+
+def test_parallel_storage_uses_mysql_database_name_even_when_isolated(tmp_path):
+    storage = build_storage_url(
+        study_name="bfs_motpe_fl_dse",
+        parallel=parse_bool("True"),
+        isolated_folder_path=str(tmp_path / "artifacts"),
+        isolated=True,
+    )
+
+    assert storage == "mysql+pymysql://root:password@localhost/bfs_motpe_fl_dse"
+    assert str(tmp_path) not in storage
