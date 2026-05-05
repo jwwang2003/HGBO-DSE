@@ -62,7 +62,7 @@ def test_websocket_background_task_is_async():
     assert "asyncio.get_event_loop()" not in source
 
 
-def test_celery_and_compose_use_real_env_driven_app():
+def test_celery_app_uses_real_env_driven_app_and_compose_uses_mcp_server():
     celery_source = (REPO / "helpers" / "celery_app.py").read_text()
     compose_source = (REPO / "docker-compose.yaml").read_text()
     tasks_source = (REPO / "backend" / "tasks.py").read_text()
@@ -73,9 +73,10 @@ def test_celery_and_compose_use_real_env_driven_app():
     assert 'include=[\'backend.tasks\']' in celery_source
     assert '@app.task(name="backend.tasks.predict_impl_ppa")' in tasks_source
     assert "getGNNPred" in tasks_source
-    assert "backend.celery" not in compose_source
-    assert "helpers.celery_app:app" in compose_source
-    assert "--bind 0.0.0.0:8000" in compose_source
+    assert "uv run python -m backend.mcp_server" in compose_source
+    assert "HGBO_MCP_SECRET_DIR=/var/lib/hgbo-mcp" in compose_source
+    assert "celery -A" not in compose_source
+    assert "redis://redis:6379/0" not in compose_source
 
 
 def test_dockerfile_uses_uv_for_python_dependencies():
@@ -90,3 +91,22 @@ def test_pyproject_declares_uv_project_metadata():
 
     assert 'name = "hgbo-dse"' in pyproject
     assert "[tool.uv]" in pyproject
+
+
+def test_impl_verification_entrypoint_replays_selected_trials():
+    source = (REPO / "bome" / "impl_verify.py").read_text()
+
+    assert "selected_trials.json" in source
+    assert '"impl"' in source
+    assert "class FixedTrial" in source
+    assert "config_tree_space" in source
+    assert "genDirConfig" in source
+    assert "VitisHLSRunner" in source
+    assert "getPPA" in source
+    assert "normalizePCA" in source
+    assert "normalizePLCA" in source
+    assert "impl_verification.json" in source
+    assert '"results"' in source
+    assert '"study"' in source
+    assert '"implementation"' in source
+    assert "Completed implementation for trial" in source

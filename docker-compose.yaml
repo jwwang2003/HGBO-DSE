@@ -1,40 +1,16 @@
 services:
-  celery:
+  mcp-inference:
     build: .
-    working_dir: ${HGBO_SHARED_CONTAINER_ROOT:-/app}
-    command: "uv run celery -A helpers.celery_app:app worker --pool=threads --loglevel=info"
+    working_dir: /app
+    command: "uv run python -m backend.mcp_server"
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - HGBO_SHARED_ROOT=${HGBO_SHARED_CONTAINER_ROOT:-/app}
-    volumes:
-      - ${HGBO_SHARED_HOST_ROOT:-.}:${HGBO_SHARED_CONTAINER_ROOT:-/app}
-    depends_on:
-      - redis
-    networks:
-      - backend_network
-
-  gunicorn:
-    build: .
-    working_dir: ${HGBO_SHARED_CONTAINER_ROOT:-/app}
-    command: "uv run gunicorn --bind 0.0.0.0:8000 -k uvicorn.workers.UvicornWorker backend.entry:app"
-    environment:
-      - HGBO_ADMIN_USER=${HGBO_ADMIN_USER:-}
-      - HGBO_ADMIN_PASS=${HGBO_ADMIN_PASS:-}
+      - HGBO_MCP_SECRET_DIR=/var/lib/hgbo-mcp
+      - HGBO_MCP_HOST=0.0.0.0
+      - HGBO_MCP_PORT=8000
     ports:
       - "8000:8000"
     volumes:
-      - ${HGBO_SHARED_HOST_ROOT:-.}:${HGBO_SHARED_CONTAINER_ROOT:-/app}
-    depends_on:
-      - redis
-    networks:
-      - backend_network
+      - hgbo_mcp_data:/var/lib/hgbo-mcp
 
-  redis:
-    image: redis:alpine
-    networks:
-      - backend_network
-
-networks:
-  backend_network:
-    driver: bridge
+volumes:
+  hgbo_mcp_data:

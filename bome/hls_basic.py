@@ -28,6 +28,9 @@ class HLSBasic(object):
         log: Logger=None,
         isolated: str=None,  # (optional) specifies a temporary directory for the working directory
         inference_mode: str=None,
+        config_path: str=None,
+        params_path: str=None,
+        project_path: str=None,
     ):
         self.root = root
         self.mode = mode
@@ -57,6 +60,9 @@ class HLSBasic(object):
         self.log = log
         self.isolated = isolated  # New isolated folder parameter
         self.inference_mode = normalize_inference_mode(inference_mode)
+        self.config_path_override = config_path
+        self.params_path_override = params_path
+        self.ori_prj_path_override = project_path
         self.isolated_folder_path = None
         self.context: str = None
 
@@ -79,6 +85,23 @@ class HLSBasic(object):
         self.get_hls_script_path()
         self.static_config = getYaml(self.config_path, self.log)
         self.params = getYaml(self.params_path, self.log)
+        self.log.info("[Compass] HGBO-DSE root: {}".format(self.root))
+        self.log.info("[Compass] Using config.yaml: {}".format(self.config_path))
+        self.log.info("[Compass] Using params.yaml: {}".format(self.params_path))
+        self.log.info("[Compass] Using HLS project path: {}".format(self.ori_prj_path))
+        self.log.info("[Compass] DSE options: mode={}, bench={}, case={}, ver={}, alg={}, num={}, encode={}, space={}, inference_mode={}".format(
+            self.mode,
+            self.bench,
+            self.case,
+            self.ver,
+            self.alg,
+            self.num,
+            self.encode,
+            self.space,
+            self.inference_mode,
+        ))
+        if self.inference_mode == "host":
+            self.log.info("[Inference] Host inference selected; HGP model weights will load from hgp/model during prediction.")
         self.config_space()
         self.gen_space_temp()
         self.gen_hls_temp_script()
@@ -92,6 +115,11 @@ class HLSBasic(object):
         return self.root
 
     def get_config_path(self):
+        config_path_override = getattr(self, "config_path_override", None)
+        if config_path_override:
+            self.config_path = os.path.abspath(config_path_override)
+            return self.config_path
+
         if self.ver == "":
             self.config_path = os.path.join(
                 self.get_cwd(), 
@@ -109,6 +137,11 @@ class HLSBasic(object):
         return self.config_path
 
     def get_params_path(self):
+        params_path_override = getattr(self, "params_path_override", None)
+        if params_path_override:
+            self.params_path = os.path.abspath(params_path_override)
+            return self.params_path
+
         if self.ver == "":
             self.params_path = os.path.join(
                 self.get_cwd(), 
@@ -126,6 +159,11 @@ class HLSBasic(object):
         return self.params_path
 
     def get_ori_prj_path(self):
+        ori_prj_path_override = getattr(self, "ori_prj_path_override", None)
+        if ori_prj_path_override:
+            self.ori_prj_path = os.path.abspath(ori_prj_path_override)
+            return self.ori_prj_path
+
         self.ori_prj_path = os.path.join(
             os.path.join(self.root, 'benchmark'),
             self.bench,

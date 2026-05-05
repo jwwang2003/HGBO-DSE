@@ -29,6 +29,28 @@ supported = {
     "space": ["homo", "tree"],
 }
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+
+    raise argparse.ArgumentTypeError(
+        "Invalid boolean value {!r}; expected true/false.".format(value)
+    )
+
+
+def build_storage_url(study_name, parallel, isolated_folder_path=None, isolated=None):
+    artifact_folder = isolated_folder_path if isolated else ""
+    storage_path = os.path.join(artifact_folder, study_name + ".db")
+    if parallel:
+        return "mysql+pymysql://root:password@localhost/" + storage_path
+    return "sqlite:///" + storage_path
+
 class IterationCallback:
     def __init__(self, log: Logger):
         self.caseNumber = 0
@@ -161,8 +183,11 @@ def runDSE(basic: HLSBasic, progress_callback=None):
     else:
         study_name = case + "_" + alg + "_dse"
         
-    storage_path = os.path.join(
-        basic.isolated_folder_path if isolated_path else "", study_name + ".db"
+    storage = build_storage_url(
+        study_name=study_name,
+        parallel=parallel,
+        isolated_folder_path=basic.isolated_folder_path,
+        isolated=isolated_path,
     )
     if parallel:
         # Important: must create the corresponding database in MySQL.
@@ -170,12 +195,10 @@ def runDSE(basic: HLSBasic, progress_callback=None):
         # mysql -u root -p
         # CREATE DATABASE 'study_name';
         # SHOW DATABASES; (to see if the database is created successfully)
-        storage = "mysql+pymysql://root:password@localhost/" + storage_path
         basic.log.info('Using MySQL Database to store the distributed running data!')
     else:
         # Sqlite is not suitable for distributed running.
-        storage = "sqlite:///" + storage_path
-        basic.log.info('Using Sqlite Database to store data!')
+        basic.log.info('Using Sqlite Database to store data at {}!'.format(storage.replace("sqlite:///", "")))
     
     # specify random number seed
     seed = 12345
@@ -405,15 +428,18 @@ def main():
     parser.add_argument("--clk", type=str, help="Clock period for implementation.", default="10")
     parser.add_argument("--encode", type=str, help="Float or discrete encoding style.", default="float")
     parser.add_argument("--space", type=str, help="Tree-structured or homo-structured design space.", default="tree")
-    parser.add_argument("--parallel", type=bool, help="Using parallel running or not.", default=False)
+    parser.add_argument("--parallel", type=parse_bool, help="Using parallel running or not.", default=False)
     parser.add_argument("--process", type=int, help="The process number of current running.", default=1)
     parser.add_argument("--isolated", type=str, help="Work in a isolated folder environemnt.", default=None)
+    parser.add_argument("--config-path", type=str, help="Override config.yaml path for packaged Compass runs.", default=None)
+    parser.add_argument("--params-path", type=str, help="Override params.yaml path for packaged Compass runs.", default=None)
+    parser.add_argument("--project-path", type=str, help="Override benchmark project source path for packaged Compass runs.", default=None)
     parser.add_argument(
         "--inference-mode",
         type=str,
         choices=["host", "remote"],
         default=os.getenv("HGBO_INFERENCE_MODE", "host"),
-        help="Run HGP model inference on the host or dispatch it to a Celery worker.",
+        help="Run HGP model inference on the host or through the MCP service.",
     )
     
     args = parser.parse_args()
@@ -432,6 +458,9 @@ def main():
     process = args.process
     isolated = args.isolated
     inference_mode = args.inference_mode
+    config_path = args.config_path
+    params_path = args.params_path
+    project_path = args.project_path
 
     root = os.path.abspath("./")
     basic = HLSBasic(
@@ -450,6 +479,9 @@ def main():
         clk,
         isolated=isolated,
         inference_mode=inference_mode,
+        config_path=config_path,
+        params_path=params_path,
+        project_path=project_path,
     )
     
     iterationCallback = IterationCallback(basic.log)

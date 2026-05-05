@@ -48,12 +48,26 @@ except ImportError:
         _TLS.context_id = None
 
 
-def with_context(fn):
-    @functools.wraps(fn)
+def with_context(target):
+    if isinstance(target, type):
+        original_init = target.__init__
+
+        @functools.wraps(original_init)
+        def wrapped_init(self, *args, **kwargs):
+            set_context_id()
+            try:
+                original_init(self, *args, **kwargs)
+            finally:
+                clear_context_id()
+
+        target.__init__ = wrapped_init
+        return target
+
+    @functools.wraps(target)
     def wrapper(*args, **kwargs):
         set_context_id()        # new UUID at start
         try:
-            return fn(*args, **kwargs)
+            return target(*args, **kwargs)
         finally:
             clear_context_id()  # reset afterwards
     return wrapper

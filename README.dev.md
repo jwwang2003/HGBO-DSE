@@ -7,7 +7,7 @@ Start the Docker container for running the:
 docker run --rm -it -v /home/wjw/tools/xilinx:/home/wjw/tools/xilinx:ro -p 8000:8000 <image-name>
 ```
 
-### Bulding the Docker container for Celery Backend
+### Building the Docker container for MCP remote inference
 
 Run the following command in the root of the project directory to build the container:
 ```
@@ -20,7 +20,13 @@ Create the host environment with `uv`:
 
 ```
 uv venv --python 3.9
-uv pip install -r requirements.txt -f https://download.pytorch.org/whl/cpu
+uv sync
+```
+
+Verify the runtime imports:
+
+```
+uv run python -c "import optuna, torch, torchvision, torchaudio, torch_geometric, torch_scatter, torch_sparse; print('HGBO deps OK')"
 ```
 
 ### Host DSE + host inference
@@ -31,25 +37,28 @@ Run Vitis HLS and HGP model inference on the host:
 uv run python -m bome.hls_dse --mode hgp --inference-mode host --case viterbi --ver viterbi --num 10 --isolated context1
 ```
 
-### Host DSE + remote inference
+### Host DSE + MCP remote inference
 
-Run Vitis HLS on the host, then dispatch only HGP model inference to the Celery worker. The host and worker must see the same generated project paths through a shared filesystem.
+Run Vitis HLS on the host, then dispatch only HGP model inference to the Docker MCP service. The request contains a zip payload of `prj_*/graph`, so the container does not need a host `.compass` mount.
 
-Start Redis and the inference worker:
+Start the MCP inference server:
 
 ```
-export HGBO_SHARED_HOST_ROOT="$(pwd)"
-export HGBO_SHARED_CONTAINER_ROOT="$(pwd)"
-docker compose up redis celery
+docker compose up --build mcp-inference
+```
+
+Show the persistent API key:
+
+```
+docker compose exec mcp-inference uv run python -m backend.mcp_server --show-api-key
 ```
 
 Then run the host-side DSE process:
 
 ```
-HGBO_INFERENCE_MODE=remote \
-CELERY_BROKER_URL=redis://localhost:6379/0 \
-CELERY_RESULT_BACKEND=redis://localhost:6379/0 \
-uv run python -m bome.hls_dse --mode hgp --inference-mode remote --case viterbi --ver viterbi --num 10 --isolated context1
+HGBO_MCP_URL=http://localhost:8000/mcp \
+HGBO_MCP_API_KEY=<key> \
+uv run python -m bome.hls_dse --mode hgp --inference-mode remote --case bfs --ver bulk --num 10 --isolated context1
 ```
 
 In `impl` mode, the HGP prediction model is not used; the flow runs HLS/Vivado and reads implementation reports.

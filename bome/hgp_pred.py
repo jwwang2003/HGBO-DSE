@@ -45,6 +45,7 @@ def get_idx(case):
 def getGNNPred(prj_path, hls_attr, case):
 
     dictIMPL = dict()
+    print("[Inference] Loading HGP model weights from {}".format(os.path.abspath(os.path.join(os.curdir, 'hgp', 'model'))))
 
     myIRfolder = os.path.join(prj_path, 'graph')
     mySavePath = os.path.join(prj_path, 'cdfg')

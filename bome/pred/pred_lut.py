@@ -5,6 +5,7 @@ from torch_geometric.nn.conv import SAGEConv, GCNConv, GATConv
 from torch_geometric.nn.dense import Linear
 from torch_geometric.nn.models import JumpingKnowledge
 from torch_geometric.nn.pool import global_add_pool, global_max_pool, SAGPooling
+from bome.pred.checkpoint import load_pretrained_state_dict
 
 
 jknFlag = 0
@@ -81,7 +82,7 @@ def lut_pred(data):
     model = HierNet(in_channels=15, hidden_channels=64, num_layers=3, conv_type='sage',
                     hls_dim=6, drop_out=0.0)
     model = model.to(device)
-    model.load_state_dict(params['model'])
+    load_pretrained_state_dict(model, params['model'])
 
     model.eval()
     with torch.no_grad():

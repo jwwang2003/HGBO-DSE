@@ -18,8 +18,6 @@ def normalize_inference_mode(mode=None):
 
 
 def dispatch_remote_inference(prj_path, hls_attr, case, timeout=None):
-    timeout = timeout or int(os.getenv("HGBO_REMOTE_TIMEOUT_SEC", "600"))
-    from backend.tasks import predict_impl_ppa_task
+    from backend.mcp_client import predict_impl_ppa
 
-    result = predict_impl_ppa_task.delay(prj_path, list(hls_attr), case)
-    return result.get(timeout=timeout)
+    return predict_impl_ppa(prj_path, list(hls_attr), case, timeout=timeout)

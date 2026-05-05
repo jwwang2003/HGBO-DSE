@@ -29,13 +29,10 @@ RUN apt-get install -y libstdc++6 dpkg-dev \
 ENV XILINX_INSTALL=/home/wjw/tools/xilinx
 # ENV PATH="${XILINX_INSTALL}/Vitis/2022.1/bin:${PATH}"
 
-# Install Python dependencies with uv.
-COPY pyproject.toml requirements.txt ./
-RUN uv pip install --system --requirement requirements.txt \
-    --index-url http://192.168.139.1:5000/index/ \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    --find-links https://download.pytorch.org/whl/cpu \
-    --allow-insecure-host 192.168.139.1
+# Install Python dependencies from pyproject.toml with uv.
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-install-project
 
 # Copy application code
 COPY . .

@@ -116,37 +116,17 @@ ENV XILINX_INSTALL=/home/wjw/tools/xilinx
 
 ---
 
-## PyTorch Installation
-
-```dockerfile
-RUN pip install --upgrade pip
-RUN pip install --trusted-host 192.168.139.1 --index-url http://192.168.139.1:5000/index/ \
-    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --extra-index-url https://download.pytorch.org/whl/cpu
-```
-
-* **Upgrade pip**: Ensures the latest packaging features.
-* **Install CPU-only PyTorch**:
-
-  * Uses a local PyPI mirror at `192.168.139.1` for faster downloads.
-  * Falls back to official PyTorch CPU wheel repository.
-
----
-
 ## Python Dependencies
 
 ```dockerfile
-COPY requirements.txt .
-RUN pip install --trusted-host 192.168.139.1 --index-url http://192.168.139.1:5000/index/ \
-    --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
-    --no-cache -r requirements.txt -f https://download.pytorch.org/whl/cpu
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-install-project
 ```
 
-* **COPY requirements.txt**: Includes your application’s dependencies list.
-* **pip install**:
-
-  * Installs from the local mirror and Alibaba Cloud’s PyPI mirror.
-  * `--no-cache` to avoid caching wheels and lighten the image.
-  * `-f` to specify extra locations for binary wheels (e.g., PyTorch CPU wheels).
+* **UV_PROJECT_ENVIRONMENT**: Installs the project environment into the container Python prefix instead of a hidden `.venv`.
+* **COPY pyproject.toml uv.lock**: Uses the uv project metadata and lockfile as the single dependency source.
+* **uv sync --no-install-project**: Installs pinned runtime dependencies, including PyTorch CPU wheels and PyG native wheels routed by `tool.uv.sources`.
 
 ---
 

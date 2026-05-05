@@ -3,12 +3,128 @@ name = "hgbo-dse"
 version = "0.1.0"
 description = "HGBO-DSE host DSE and optional remote inference tooling"
 requires-python = ">=3.9,<3.10"
-dependencies = []
+dependencies = [
+    "aiohappyeyeballs==2.6.1",
+    "aiohttp==3.11.18",
+    "aiosignal==1.3.2",
+    "alembic==1.15.2",
+    "amqp==5.3.1",
+    "annotated-types==0.7.0",
+    "anyio==4.9.0",
+    "async-timeout==5.0.1",
+    "attrs==25.3.0",
+    "bidict==0.23.1",
+    "billiard==4.2.1",
+    "blinker==1.9.0",
+    "celery==5.5.2",
+    "certifi==2025.1.31",
+    "charset-normalizer==3.4.1",
+    "click==8.1.8",
+    "click-didyoumean==0.3.0",
+    "click-plugins==1.1.1",
+    "click-repl==0.3.0",
+    "cmaes==0.11.1",
+    "colorlog==6.9.0",
+    "dotenv==0.9.9",
+    "exceptiongroup==1.3.0",
+    "fastapi==0.115.14",
+    "filelock==3.13.1",
+    "Flask==3.1.0",
+    "flask-cors==5.0.1",
+    "Flask-SocketIO==5.5.1",
+    "frozenlist==1.6.0",
+    "fsspec==2024.6.1",
+    "gevent==25.4.2",
+    "graphviz==0.20.3",
+    "greenlet==3.2.0",
+    "gunicorn==23.0.0",
+    "h11==0.16.0",
+    "idna==3.10",
+    "importlib-metadata==8.7.0",
+    "itsdangerous==2.2.0",
+    "Jinja2==3.1.4",
+    "joblib==1.4.2",
+    "kaleido==0.2.1",
+    "kombu==5.5.3",
+    "Mako==1.3.10",
+    "MarkupSafe==2.1.5",
+    "mpmath==1.3.0",
+    "multidict==6.4.3",
+    "narwhals==1.36.0",
+    "networkx==3.2.1",
+    "numpy==1.26.3",
+    "optuna==3.2.0",
+    "packaging==25.0",
+    "pillow==11.0.0",
+    "plotly==6.0.1",
+    "prompt-toolkit==3.0.51",
+    "propcache==0.3.1",
+    "psutil==7.0.0",
+    "pydantic==2.11.7",
+    "pydantic-core==2.33.2",
+    "pyDOE==0.3.8",
+    "pydot==3.0.4",
+    "pyparsing==3.2.3",
+    "python-dateutil==2.9.0.post0",
+    "python-dotenv==1.1.0",
+    "python-engineio==4.12.0",
+    "python-multipart==0.0.20",
+    "python-socketio==5.13.0",
+    "PyYAML==6.0.2",
+    "redis==5.2.1",
+    "requests==2.32.3",
+    "scikit-learn==1.6.1",
+    "scipy==1.13.1",
+    "simple-websocket==1.1.0",
+    "six==1.17.0",
+    "sniffio==1.3.1",
+    "SQLAlchemy==2.0.40",
+    "starlette==0.46.2",
+    "sympy==1.13.1",
+    "threadpoolctl==3.6.0",
+    "torch==2.6.0",
+    "torch-geometric==2.6.0",
+    "torch-scatter==2.1.2",
+    "torch-sparse==0.6.18",
+    "torchaudio==2.6.0",
+    "torchvision==0.21.0",
+    "tqdm==4.67.1",
+    "triton==3.2.0",
+    "typing-extensions==4.12.2",
+    "typing-inspection==0.4.1",
+    "tzdata==2025.2",
+    "urllib3==2.4.0",
+    "uvicorn==0.35.0",
+    "vine==5.1.0",
+    "waitress==3.0.2",
+    "wcwidth==0.2.13",
+    "websocket-client==0.44.0",
+    "websockets==15.0.1",
+    "Werkzeug==3.1.3",
+    "wsproto==1.2.0",
+    "yarl==1.20.0",
+    "zipp==3.21.0",
+    "zope.event==5.0",
+    "zope.interface==7.2",
+]
 
 [tool.uv]
 package = false
 
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+"torch-scatter" = { index = "pyg-torch-260-cpu" }
+"torch-sparse" = { index = "pyg-torch-260-cpu" }
+
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pyg-torch-260-cpu"
+url = "https://data.pyg.org/whl/torch-2.6.0+cpu.html"
+format = "flat"
 explicit = true
