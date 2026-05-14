@@ -1,0 +1,673 @@
+from __future__ import annotations
+
+import argparse
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import torch
+import torch.nn.functional as F
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn.conv import GATConv, GCNConv, GINEConv, SAGEConv
+from torch_geometric.nn.dense import Linear
+from torch_geometric.nn.models import JumpingKnowledge
+from torch_geometric.nn.pool import SAGPooling, global_add_pool, global_max_pool, global_mean_pool
+
+from hgp.arch_aware_arch import (
+    ARCH_AWARE_LAYOUT_COLS,
+    ARCH_AWARE_METADATA_DIM,
+    ARCH_AWARE_TILE_SLOTS,
+    arch_aware_arch_to_device,
+    ensure_arch_aware_arch_cache,
+    load_arch_aware_arch_cache,
+)
+from hgp.board_fabric import board_fabric_to_device, ensure_board_fabric_cache, load_board_fabric_cache
+from hgp.board_utils import ARCH_ATTR_FIELDS, DEFAULT_BOARD_DEVICE
+from hgp.dataset_utils import generate_dataset, mae_loss, mape_loss, split_dataset
+
+
+TARGETS = ["lut", "ff", "dsp", "bram", "uram", "srl", "cp", "power"]
+ARCH_AWARE_MODE = "arch-aware"
+jknFlag = 0
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    name: str
+    target_index: int
+    dataset_subdir: str
+    hls_dim: int
+    pool_mode: str
+    metric_name: str
+    metric_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+    label_scale: float = 1.0
+    checkpoint_stem: str | None = None
+
+
+TARGET_SPECS = {
+    "lut": TargetSpec("lut", 0, "std_arch", 6, "add", "mape", mape_loss),
+    "ff": TargetSpec("ff", 1, "std_arch", 6, "add", "mape", mape_loss),
+    "dsp": TargetSpec("dsp", 2, "std_arch", 6, "add", "mae", mae_loss, checkpoint_stem="dsp_mae"),
+    "bram": TargetSpec("bram", 3, "std_arch", 6, "add", "mae", mae_loss, checkpoint_stem="bram_mae"),
+    "cp": TargetSpec("cp", 6, "rdc_arch", 1, "mean", "mape", mape_loss, checkpoint_stem="cp_mean"),
+    "power": TargetSpec("power", 7, "std_arch", 6, "mean", "mape", mape_loss, label_scale=100.0, checkpoint_stem="power_mean"),
+}
+
+
+HGBO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _default_dataset_dir(dataset_subdir):
+    return HGBO_ROOT / "dataset" / dataset_subdir
+
+
+def _make_mlp(input_dim, hidden_dim, output_dim):
+    return torch.nn.Sequential(
+        Linear(input_dim, hidden_dim),
+        torch.nn.ReLU(),
+        Linear(hidden_dim, output_dim),
+    )
+
+
+def _make_design_conv(conv_type, in_channels, out_channels, edge_dim=None):
+    if conv_type == "gcn":
+        return GCNConv(in_channels, out_channels)
+    if conv_type == "gat":
+        return GATConv(in_channels, out_channels)
+    if conv_type == "sage":
+        return SAGEConv(in_channels, out_channels)
+    if conv_type == "gine":
+        if edge_dim is None:
+            raise ValueError("conv_type='gine' requires design_edge_dim")
+        return GINEConv(_make_mlp(in_channels, out_channels, out_channels), edge_dim=edge_dim)
+    raise ValueError("Unknown conv_type {!r}".format(conv_type))
+
+
+def _apply_design_conv(conv, conv_type, x, edge_index, edge_attr=None):
+    if conv_type != "gine":
+        return conv(x, edge_index)
+    if edge_attr is None:
+        raise ValueError("conv_type='gine' requires edge_attr in forward")
+    return conv(x, edge_index, edge_attr.to(torch.float32))
+
+
+class BoardFabricEncoder(torch.nn.Module):
+    def __init__(
+        self,
+        node_input_dim,
+        edge_input_dim,
+        graph_input_dim,
+        hidden_dim=32,
+        num_layers=2,
+        output_dim=32,
+    ):
+        super().__init__()
+        self.node_proj = Linear(node_input_dim, hidden_dim)
+        self.edge_proj = Linear(edge_input_dim, hidden_dim)
+        self.layers = torch.nn.ModuleList(
+            GINEConv(_make_mlp(hidden_dim, hidden_dim, hidden_dim), edge_dim=hidden_dim)
+            for _ in range(num_layers)
+        )
+        self.norms = torch.nn.ModuleList(torch.nn.BatchNorm1d(hidden_dim) for _ in range(num_layers))
+        self.graph_mlp = _make_mlp(graph_input_dim, hidden_dim, output_dim)
+        self.fuse = _make_mlp(output_dim * 2, hidden_dim, output_dim)
+
+    def forward(self, arch_graph):
+        if torch.is_tensor(arch_graph):
+            return arch_graph
+
+        arch_x = arch_graph["arch_x"].to(torch.float32)
+        arch_edge_index = arch_graph["arch_edge_index"]
+        arch_edge_attr = arch_graph["arch_edge_attr"].to(torch.float32)
+        arch_graph_attr = arch_graph["arch_graph_attr"].to(torch.float32)
+
+        if arch_graph_attr.dim() == 1:
+            arch_graph_attr = arch_graph_attr.unsqueeze(0)
+
+        arch_x = self.node_proj(arch_x)
+        arch_edge_attr = self.edge_proj(arch_edge_attr)
+        for layer, norm in zip(self.layers, self.norms):
+            residual = arch_x
+            arch_x = layer(arch_x, arch_edge_index, arch_edge_attr)
+            arch_x = norm(arch_x)
+            arch_x = F.relu(arch_x + residual)
+
+        batch = torch.zeros(arch_x.size(0), dtype=torch.long, device=arch_x.device)
+        pooled = global_mean_pool(arch_x, batch)
+        graph_embedding = self.graph_mlp(arch_graph_attr)
+        return self.fuse(torch.cat([pooled, graph_embedding], dim=-1))
+
+
+class ArchAwareArchitectureEncoder(torch.nn.Module):
+    def __init__(
+        self,
+        layout_cols=ARCH_AWARE_LAYOUT_COLS,
+        tile_slots=ARCH_AWARE_TILE_SLOTS,
+        metadata_dim=ARCH_AWARE_METADATA_DIM,
+        hidden_dim=32,
+        output_dim=32,
+    ):
+        super().__init__()
+        self.layout_cols = layout_cols
+        self.tile_slots = tile_slots
+        self.metadata_dim = metadata_dim
+        self.input_dim = layout_cols * tile_slots + metadata_dim
+        self.mlp = torch.nn.Sequential(
+            Linear(self.input_dim, hidden_dim),
+            torch.nn.ReLU(),
+            Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            Linear(hidden_dim, output_dim),
+        )
+
+    def _layout_batch(self, layout, metadata_batch_size):
+        layout = layout.to(torch.float32)
+        if layout.dim() == 3:
+            if metadata_batch_size > 1 and layout.size(0) == metadata_batch_size * self.layout_cols:
+                return layout.view(metadata_batch_size, self.layout_cols, 1, self.tile_slots)
+            return layout.unsqueeze(0)
+        if layout.dim() == 4:
+            return layout
+        raise ValueError("Expected arch-aware layout with 3 or 4 dimensions, got {}".format(tuple(layout.shape)))
+
+    def forward(self, arch_input):
+        if torch.is_tensor(arch_input):
+            return arch_input
+
+        metadata = arch_input["arch_aware_arch_metadata"].to(torch.float32)
+        if metadata.dim() == 1:
+            metadata = metadata.unsqueeze(0)
+        layout = self._layout_batch(arch_input["arch_aware_arch_layout"], metadata.size(0))
+        if metadata.size(0) == 1 and layout.size(0) > 1:
+            metadata = metadata.expand(layout.size(0), -1)
+        elif layout.size(0) == 1 and metadata.size(0) > 1:
+            layout = layout.expand(metadata.size(0), -1, -1, -1)
+        elif layout.size(0) != metadata.size(0):
+            raise ValueError(
+                "arch-aware layout batch {} does not match metadata batch {}".format(
+                    layout.size(0),
+                    metadata.size(0),
+                )
+            )
+
+        flat_layout = layout.reshape(layout.size(0), -1)
+        return self.mlp(torch.cat([flat_layout, metadata], dim=-1))
+
+
+class ArchAwareHierNet(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        hidden_channels,
+        num_layers,
+        conv_type,
+        hls_dim,
+        arch_dim=len(ARCH_ATTR_FIELDS),
+        arch_node_dim=24,
+        arch_edge_dim=4,
+        arch_graph_dim=32,
+        arch_hidden_dim=16,
+        fabric_hidden_dim=32,
+        design_edge_dim=None,
+        arch_mode="fabric",
+        arch_aware_hidden_dim=32,
+        arch_aware_output_dim=32,
+        drop_out=0.0,
+        pool_ratio=0.5,
+        pool_mode="add",
+    ):
+        super(ArchAwareHierNet, self).__init__()
+
+        self.drop_out = drop_out
+        self.pool_ratio = pool_ratio
+        self.pool_mode = pool_mode
+        self.conv_type = conv_type
+        self.arch_mode = arch_mode
+
+        self.convs = torch.nn.ModuleList()
+        self.pools = torch.nn.ModuleList()
+
+        for i in range(num_layers):
+            if i == 0:
+                self.convs.append(_make_design_conv(conv_type, in_channels, hidden_channels, design_edge_dim))
+            else:
+                self.convs.append(_make_design_conv(conv_type, hidden_channels, hidden_channels, design_edge_dim))
+            self.pools.append(SAGPooling(hidden_channels, self.pool_ratio))
+        if jknFlag:
+            self.jkn = JumpingKnowledge("lstm", channels=hidden_channels, num_layers=2)
+
+        if arch_mode == ARCH_AWARE_MODE:
+            self.arch_mlp = None
+        else:
+            self.arch_mlp = torch.nn.Sequential(
+                Linear(arch_dim, arch_hidden_dim),
+                torch.nn.ReLU(),
+                Linear(arch_hidden_dim, arch_hidden_dim),
+            )
+        self.arch_graph_dim = arch_graph_dim
+        self.board_encoder = BoardFabricEncoder(
+            node_input_dim=arch_node_dim,
+            edge_input_dim=arch_edge_dim,
+            graph_input_dim=arch_graph_dim,
+            hidden_dim=fabric_hidden_dim,
+            num_layers=2,
+            output_dim=fabric_hidden_dim,
+        )
+        self.arch_aware_encoder = ArchAwareArchitectureEncoder(
+            metadata_dim=ARCH_AWARE_METADATA_DIM,
+            hidden_dim=arch_aware_hidden_dim,
+            output_dim=arch_aware_output_dim,
+        )
+        if arch_mode == ARCH_AWARE_MODE:
+            self.channels = [hidden_channels * 2 + hls_dim + arch_aware_output_dim, 64, 64, 1]
+        else:
+            self.channels = [hidden_channels * 2 + hls_dim + arch_hidden_dim + fabric_hidden_dim, 64, 64, 1]
+        self.mlps = torch.nn.ModuleList()
+
+        for i in range(len(self.channels) - 1):
+            fc = Linear(self.channels[i], self.channels[i + 1])
+            self.mlps.append(fc)
+
+    def _pool(self, x, batch):
+        if self.pool_mode == "mean":
+            return torch.cat([global_max_pool(x, batch), global_mean_pool(x, batch)], dim=1)
+        return torch.cat([global_max_pool(x, batch), global_add_pool(x, batch)], dim=1)
+
+    def _board_embedding(self, arch_graph):
+        if self.arch_mode == ARCH_AWARE_MODE:
+            return self.arch_aware_encoder(arch_graph)
+        return self.board_encoder(arch_graph)
+
+    def forward(self, x, edge_index, batch, hls_attr, arch_graph, arch_attr=None, edge_attr=None):
+        x = x.to(torch.float32)
+        hls_attr = hls_attr.to(torch.float32)
+        if arch_attr is None:
+            arch_attr = arch_graph
+            if self.arch_mode == ARCH_AWARE_MODE:
+                arch_graph = {
+                    "arch_aware_arch_layout": torch.zeros(
+                        (ARCH_AWARE_LAYOUT_COLS, 1, ARCH_AWARE_TILE_SLOTS),
+                        dtype=torch.float32,
+                        device=x.device,
+                    ),
+                    "arch_aware_arch_metadata": torch.zeros(
+                        (1, ARCH_AWARE_METADATA_DIM),
+                        dtype=torch.float32,
+                        device=x.device,
+                    ),
+                }
+            else:
+                arch_graph = torch.zeros((1, self.arch_graph_dim), dtype=torch.float32, device=x.device)
+        arch_attr = arch_attr.to(torch.float32)
+        h_list = []
+
+        for step in range(len(self.convs)):
+            x = _apply_design_conv(self.convs[step], self.conv_type, x, edge_index, edge_attr)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.drop_out, training=self.training)
+            x, edge_index, edge_attr, batch, _, _ = self.pools[step](x, edge_index, edge_attr, batch, None)
+            h = self._pool(x, batch)
+            h_list.append(h)
+
+        if jknFlag:
+            x = self.jkn(h_list)
+        x = h_list[0] + h_list[1] + h_list[2] if len(h_list) >= 3 else sum(h_list)
+        board_embedding = self._board_embedding(arch_graph)
+        if board_embedding.size(0) != x.size(0):
+            board_embedding = board_embedding.expand(x.size(0), -1)
+        if self.arch_mode == ARCH_AWARE_MODE:
+            x = torch.cat([x, hls_attr, board_embedding], dim=-1)
+        else:
+            arch_embedding = self.arch_mlp(arch_attr)
+            x = torch.cat([x, hls_attr, arch_embedding, board_embedding], dim=-1)
+
+        for f in range(len(self.mlps)):
+            if f < len(self.mlps) - 1:
+                x = F.relu(self.mlps[f](x))
+                x = F.dropout(x, p=self.drop_out, training=self.training)
+            else:
+                x = self.mlps[f](x)
+
+        return x
+
+
+def _target_values(data, spec):
+    return data["y"].t()[spec.target_index] * spec.label_scale
+
+
+def _ensure_finite_tensor(value, name, phase, epoch=None, batch_idx=None):
+    if not torch.is_tensor(value):
+        value = torch.as_tensor(value)
+    if torch.isfinite(value).all():
+        return
+
+    bad_count = int((~torch.isfinite(value)).sum().item())
+    parts = ["non-finite {}".format(name), "during {}".format(phase)]
+    if epoch is not None:
+        parts.append("epoch {}".format(epoch))
+    if batch_idx is not None:
+        parts.append("batch {}".format(batch_idx))
+    parts.append("({} of {} values)".format(bad_count, value.numel()))
+    raise RuntimeError(" ".join(parts))
+
+
+def _architecture_input_from_batch(model, data, fallback):
+    if (
+        getattr(model, "arch_mode", None) == ARCH_AWARE_MODE
+        and getattr(data, "arch_aware_arch_layout", None) is not None
+        and getattr(data, "arch_aware_arch_metadata", None) is not None
+    ):
+        return {
+            "arch_aware_arch_layout": data["arch_aware_arch_layout"],
+            "arch_aware_arch_metadata": data["arch_aware_arch_metadata"],
+        }
+    return fallback
+
+
+def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, epoch=0, grad_clip=None):
+    model.train()
+    total_loss = 0
+    total_metric = 0
+    for batch_idx, data in enumerate(train_loader):
+        data = data.to(device)
+        optimizer.zero_grad()
+        arch_input = _architecture_input_from_batch(model, data, board_embedding)
+        edge_attr = getattr(data, "edge_attr", None)
+        model_kwargs = {"edge_attr": edge_attr} if edge_attr is not None else {}
+        out = model(
+            data.x,
+            data.edge_index,
+            data.batch,
+            data["hls_attr"],
+            arch_input,
+            data["arch_attr"],
+            **model_kwargs,
+        )
+        out = out.view(-1)
+        true_y = _target_values(data, spec)
+        _ensure_finite_tensor(out, "model output", "training", epoch, batch_idx)
+        _ensure_finite_tensor(true_y, "target", "training", epoch, batch_idx)
+        loss = F.huber_loss(out, true_y).float()
+        metric = spec.metric_fn(out, true_y).float()
+        _ensure_finite_tensor(loss, "loss", "training", epoch, batch_idx)
+        _ensure_finite_tensor(metric, "{} metric".format(spec.metric_name), "training", epoch, batch_idx)
+        loss.backward()
+        if grad_clip is not None and grad_clip > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            _ensure_finite_tensor(grad_norm, "gradient norm", "training", epoch, batch_idx)
+        optimizer.step()
+        total_loss += loss.item() * data.num_graphs
+        total_metric += metric.item() * data.num_graphs
+    ds = train_loader.dataset
+    return total_loss / len(ds), total_metric / len(ds)
+
+
+def evaluate(model, loader, device, spec, board_embedding, epoch=0, print_predictions=False):
+    model.eval()
+    with torch.no_grad():
+        loss = 0
+        metric = 0
+        for batch_idx, data in enumerate(loader):
+            data = data.to(device)
+            arch_input = _architecture_input_from_batch(model, data, board_embedding)
+            edge_attr = getattr(data, "edge_attr", None)
+            model_kwargs = {"edge_attr": edge_attr} if edge_attr is not None else {}
+            out = model(
+                data.x,
+                data.edge_index,
+                data.batch,
+                data["hls_attr"],
+                arch_input,
+                data["arch_attr"],
+                **model_kwargs,
+            )
+            out = out.view(-1)
+            true_y = _target_values(data, spec)
+            _ensure_finite_tensor(out, "model output", "evaluation", epoch, batch_idx)
+            _ensure_finite_tensor(true_y, "target", "evaluation", epoch, batch_idx)
+            batch_loss = F.huber_loss(out, true_y).float()
+            batch_metric = spec.metric_fn(out, true_y).float()
+            _ensure_finite_tensor(batch_loss, "loss", "evaluation", epoch, batch_idx)
+            _ensure_finite_tensor(batch_metric, "{} metric".format(spec.metric_name), "evaluation", epoch, batch_idx)
+            loss += batch_loss.item() * data.num_graphs
+            metric += batch_metric.item() * data.num_graphs
+            if print_predictions and epoch % 10 == 0:
+                print("pred.y:", out / spec.label_scale)
+                print("data.y:", true_y / spec.label_scale)
+        ds = loader.dataset
+        return loss / len(ds), metric / len(ds)
+
+
+def _checkpoint_name(spec, split):
+    stem = spec.checkpoint_stem or spec.name
+    return "{}_arch_h64_d0_checkpoint_{}.pt".format(stem, split)
+
+
+def _prepare_board_training_input(model, board_fabric, fabric_mode):
+    if fabric_mode == "trainable":
+        return board_fabric
+    with torch.no_grad():
+        return model._board_embedding(board_fabric).detach()
+
+
+def _prepare_architecture_cache(args, device):
+    if args.arch_mode == ARCH_AWARE_MODE:
+        cache_path = ensure_arch_aware_arch_cache(DEFAULT_BOARD_DEVICE, cache_dir=args.arch_cache_dir)
+        arch_payload = arch_aware_arch_to_device(load_arch_aware_arch_cache(cache_path), device)
+        return cache_path, arch_payload
+
+    cache_path = ensure_board_fabric_cache(DEFAULT_BOARD_DEVICE, cache_dir=args.arch_cache_dir)
+    arch_payload = board_fabric_to_device(load_board_fabric_cache(cache_path), device)
+    return cache_path, arch_payload
+
+
+def _resolve_device(device_option):
+    if device_option == "cpu":
+        return torch.device("cpu")
+    if device_option == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested with --device cuda, but torch.cuda.is_available() is false")
+        return torch.device("cuda")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _set_cpu_threads(cpu_threads):
+    if cpu_threads is None:
+        return torch.get_num_threads()
+    if cpu_threads < 1:
+        raise ValueError("--cpu-threads must be >= 1")
+    torch.set_num_threads(cpu_threads)
+    return torch.get_num_threads()
+
+
+def _loader_kwargs(args):
+    return {
+        "num_workers": args.num_workers,
+        "persistent_workers": args.num_workers > 0,
+    }
+
+
+def run_training(args):
+    active_threads = _set_cpu_threads(args.cpu_threads)
+    spec = TARGET_SPECS[args.target]
+    dataset_dir = os.path.abspath(args.dataset_dir or _default_dataset_dir(spec.dataset_subdir))
+    model_dir = os.path.abspath(args.model_dir or "./model")
+    dataset = os.listdir(dataset_dir)
+    dataset_list = generate_dataset(dataset_dir, dataset, print_info=False)
+    train_ds, test_ds = split_dataset(dataset_list, shuffle=True, seed=args.seed)
+    print("train_ds size = {}, test_ds size = {}".format(len(train_ds), len(test_ds)))
+
+    loader_kwargs = _loader_kwargs(args)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+
+    data_ini = None
+    for step, data in enumerate(train_loader):
+        if step == 0:
+            data_ini = data
+            break
+    if data_ini is None:
+        raise RuntimeError("No training data loaded from {}".format(dataset_dir))
+    if "arch_attr" not in data_ini:
+        raise RuntimeError(
+            "Dataset {} does not contain arch_attr. Generate it with "
+            "`python3 hgp/data_process/gen_dataset_board.py` first.".format(dataset_dir)
+        )
+
+    device = _resolve_device(args.device)
+    print("Using device {}".format(device))
+    print("Torch CPU threads: {}".format(active_threads))
+    print("DataLoader workers: {}".format(args.num_workers))
+    cache_path, board_fabric = _prepare_architecture_cache(args, device)
+    arch_node_dim = board_fabric["arch_x"].shape[-1] if args.arch_mode == "fabric" else 24
+    arch_edge_dim = board_fabric["arch_edge_attr"].shape[-1] if args.arch_mode == "fabric" else 4
+    arch_graph_dim = board_fabric["arch_graph_attr"].shape[-1] if args.arch_mode == "fabric" else 32
+    model = ArchAwareHierNet(
+        in_channels=data_ini.num_features,
+        hidden_channels=args.hidden_channels,
+        num_layers=args.num_layers,
+        conv_type=args.conv_type,
+        hls_dim=spec.hls_dim,
+        arch_dim=data_ini["arch_attr"].shape[-1],
+        arch_node_dim=arch_node_dim,
+        arch_edge_dim=arch_edge_dim,
+        arch_graph_dim=arch_graph_dim,
+        arch_hidden_dim=args.arch_hidden_dim,
+        fabric_hidden_dim=args.fabric_hidden_dim,
+        design_edge_dim=data_ini.edge_attr.shape[-1] if getattr(data_ini, "edge_attr", None) is not None else None,
+        arch_mode=args.arch_mode,
+        arch_aware_hidden_dim=args.arch_aware_hidden_dim,
+        arch_aware_output_dim=args.fabric_hidden_dim,
+        drop_out=args.drop_out,
+        pool_mode=spec.pool_mode,
+    )
+    model = model.to(device)
+    board_training_input = _prepare_board_training_input(model, board_fabric, args.fabric_mode)
+    print(model)
+    print(
+        "Training target {} with board profile {} ({})".format(
+            args.target,
+            DEFAULT_BOARD_DEVICE,
+            args.arch_mode,
+        )
+    )
+
+    os.makedirs(model_dir, exist_ok=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    min_train_metric = float("inf")
+    min_test_metric = float("inf")
+    for epoch in range(args.epochs):
+        train_loss, train_metric = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            spec,
+            board_training_input,
+            epoch=epoch,
+            grad_clip=args.grad_clip,
+        )
+        test_loss, test_metric = evaluate(
+            model,
+            test_loader,
+            device,
+            spec,
+            board_training_input,
+            epoch,
+            print_predictions=args.print_predictions,
+        )
+        print(f"Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
+        print(
+            "Epoch: {:03d}, Train {}: {:.4f}, Test {}: {:.4f}".format(
+                epoch,
+                spec.metric_name.upper(),
+                train_metric,
+                spec.metric_name.upper(),
+                test_metric,
+            )
+        )
+
+        if epoch % 10 == 0:
+            for p in optimizer.param_groups:
+                p["lr"] *= 0.9
+
+        if train_metric < min_train_metric:
+            min_train_metric = train_metric
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "min_train_{}".format(spec.metric_name): min_train_metric,
+                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "arch_mode": args.arch_mode,
+                    "fabric_mode": args.fabric_mode,
+                    "arch_attr_fields": ARCH_ATTR_FIELDS,
+                    "architecture_cache": str(cache_path),
+                },
+                os.path.join(model_dir, _checkpoint_name(spec, "train")),
+            )
+
+        if test_metric < min_test_metric:
+            min_test_metric = test_metric
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "min_test_{}".format(spec.metric_name): min_test_metric,
+                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "arch_mode": args.arch_mode,
+                    "fabric_mode": args.fabric_mode,
+                    "arch_attr_fields": ARCH_ATTR_FIELDS,
+                    "architecture_cache": str(cache_path),
+                },
+                os.path.join(model_dir, _checkpoint_name(spec, "test")),
+            )
+
+    print("Min Train {}: {}".format(spec.metric_name.upper(), min_train_metric))
+    print("Min Test {}: {}".format(spec.metric_name.upper(), min_test_metric))
+    return {
+        "target": args.target,
+        "min_train_metric": min_train_metric,
+        "min_test_metric": min_test_metric,
+        "metric_name": spec.metric_name,
+    }
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Train architecture-aware HGBO-DSE HGP models.")
+    parser.add_argument("--target", choices=sorted(TARGET_SPECS), default="lut")
+    parser.add_argument("--dataset-dir", default=None)
+    parser.add_argument("--model-dir", default="./model")
+    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="cpu")
+    parser.add_argument("--cpu-threads", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--hidden-channels", type=int, default=64)
+    parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--arch-hidden-dim", type=int, default=16)
+    parser.add_argument("--fabric-hidden-dim", type=int, default=32)
+    parser.add_argument("--arch-aware-hidden-dim", dest="arch_aware_hidden_dim", type=int, default=32)
+    parser.add_argument("--arch-cache-dir", default=None)
+    parser.add_argument("--arch-mode", choices=[ARCH_AWARE_MODE, "fabric"], default=ARCH_AWARE_MODE)
+    parser.add_argument("--fabric-mode", choices=["cached", "trainable"], default="cached")
+    parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine")
+    parser.add_argument("--drop-out", type=float, default=0.0)
+    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--weight-decay", type=float, default=0.001)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--print-predictions", action="store_true")
+    parser.add_argument("--seed", type=int, default=128)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    run_training(args)
+
+
+if __name__ == "__main__":
+    main()
