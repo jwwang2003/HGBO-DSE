@@ -7,7 +7,6 @@ from typing import Iterable
 import torch
 
 from hgp.board_utils import DEFAULT_BOARD_DEVICE, BoardProfile, normalize_device_name, resolve_board_profile
-from hgp.rapidwright_env import require_rapidwright_device
 
 
 TILE_CLASS_ORDER = ("CLEL", "CLEM", "INT", "INT_INTERFACE", "DSP", "BRAM", "BRK")
@@ -27,6 +26,12 @@ SITE_CLASS_ORDER = (
     "OTHER",
 )
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[1] / "dataset" / "board_arch"
+
+
+def require_rapidwright_device() -> object:
+    from hgp.rapidwright_env import require_rapidwright_device as _require_rapidwright_device
+
+    return _require_rapidwright_device()
 
 
 @dataclass(frozen=True)

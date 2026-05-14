@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +12,9 @@ torch = pytest.importorskip("torch")
 
 from hgp.board_utils import DEFAULT_BOARD_DEVICE, resolve_board_profile  # noqa: E402
 from hgp import arch_aware_arch  # noqa: E402
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeTile:
@@ -293,3 +299,46 @@ def test_arch_aware_arch_cache_round_trips_payload_with_tensors(tmp_path, monkey
     assert torch.equal(loaded["arch_aware_arch_layout"], payload["arch_aware_arch_layout"])
     assert torch.equal(loaded["arch_aware_arch_metadata"], payload["arch_aware_arch_metadata"])
     assert all(value.device.type == "cpu" for value in moved.values() if torch.is_tensor(value))
+
+
+def test_cached_architecture_loads_do_not_initialize_rapidwright(tmp_path):
+    arch_cache = tmp_path / f"{DEFAULT_BOARD_DEVICE}_arch_aware_arch.pt"
+    fabric_cache = tmp_path / f"{DEFAULT_BOARD_DEVICE}_fabric_graph.pt"
+    torch.save(
+        {
+            "device": DEFAULT_BOARD_DEVICE,
+            "arch_aware_arch_layout": torch.ones(
+                (
+                    arch_aware_arch.ARCH_AWARE_LAYOUT_COLS,
+                    1,
+                    arch_aware_arch.ARCH_AWARE_TILE_SLOTS,
+                ),
+                dtype=torch.float32,
+            ),
+            "arch_aware_arch_metadata": torch.ones((1, arch_aware_arch.ARCH_AWARE_METADATA_DIM), dtype=torch.float32),
+        },
+        arch_cache,
+    )
+    torch.save(
+        {
+            "device": DEFAULT_BOARD_DEVICE,
+            "arch_x": torch.ones((1, 24), dtype=torch.float32),
+            "arch_edge_index": torch.empty((2, 0), dtype=torch.long),
+            "arch_edge_attr": torch.empty((0, 4), dtype=torch.float32),
+            "arch_graph_attr": torch.ones((1, 32), dtype=torch.float32),
+        },
+        fabric_cache,
+    )
+
+    script = f"""
+import sys
+from hgp.arch_aware_arch import load_arch_aware_arch_cache
+from hgp.board_fabric import load_board_fabric_cache
+
+load_arch_aware_arch_cache({str(arch_cache)!r})
+load_board_fabric_cache({str(fabric_cache)!r})
+if "hgp.rapidwright_env" in sys.modules:
+    raise SystemExit("RapidWright environment initialized while loading existing caches")
+"""
+
+    subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True)

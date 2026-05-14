@@ -8,7 +8,6 @@ from typing import Iterable
 import torch
 
 from hgp.board_utils import BoardProfile, DEFAULT_BOARD_DEVICE, normalize_device_name, resolve_board_profile
-from hgp.rapidwright_env import require_rapidwright_device
 
 
 ARCH_AWARE_LAYOUT_COLS = 360
@@ -31,6 +30,12 @@ ARCH_AWARE_TILE_ID_TO_TYPE = {value: key for key, value in ARCH_AWARE_TILE_TYPE_
 
 _XY_RE = re.compile(r"(?:^|_)X(?P<x>-?\d+)Y(?P<y>-?\d+)(?:_|$)")
 _CLOCK_REGION_RE = re.compile(r"X(?P<x>-?\d+)Y(?P<y>-?\d+)")
+
+
+def require_rapidwright_device() -> object:
+    from hgp.rapidwright_env import require_rapidwright_device as _require_rapidwright_device
+
+    return _require_rapidwright_device()
 
 
 def _tokens(value: object) -> set[str]:
