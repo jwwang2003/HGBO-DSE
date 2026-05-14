@@ -1,8 +1,17 @@
 import torch
 from torch_geometric.data import Data
 
+try:
+    from hgp.board_utils import attach_board_profile, resolve_board_profile
+except ImportError:  # pragma: no cover - supports running from hgp/data_process
+    import os
+    import sys
 
-def generate_dataframe(DG, metric_list, hls_attr, bench_name, prj_name, df_store_path):
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    from hgp.board_utils import attach_board_profile, resolve_board_profile
+
+
+def generate_dataframe(DG, metric_list, hls_attr, bench_name, prj_name, df_store_path, board_device=None):
 
     data = {'x': {}, 'edge_attr': {}}
     for node_id in DG.nodes():
@@ -26,6 +35,8 @@ def generate_dataframe(DG, metric_list, hls_attr, bench_name, prj_name, df_store
     data['prj_name'] = prj_name
 
     dataframe = Data.from_dict(data)
+    if board_device is not None:
+        dataframe = attach_board_profile(dataframe, resolve_board_profile(board_device))
     torch.save(dataframe, df_store_path)
 
     return dataframe

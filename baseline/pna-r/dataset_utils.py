@@ -14,7 +14,7 @@ def generate_dataset(dataset_dir, dataset_name_list, print_info=False):
     for ds in dataset_name_list:
         ds_path = os.path.join(dataset_dir, ds)
         if os.path.isfile(ds_path):
-            tem_data = torch.load(ds_path)
+            tem_data = torch.load(ds_path, weights_only=False)
             dataset_list = dataset_list + tem_data
             if print_info:
                 print(ds_path)
