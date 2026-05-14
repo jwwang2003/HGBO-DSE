@@ -39,6 +39,32 @@ To generate 'pt' files which store CDFGs for HGP training and testing, run the f
 
 We already generate 'pt' files in path "./dataset/std/" and "./dataset/rdc/".
 
+### RapidWright ATAPP-Style Architecture Features
+HGBO-DSE can now reuse the existing `dataset/std/` and `dataset/rdc/`
+training samples while adding a RapidWright-derived ATAPP-style FPGA
+architecture representation for the default raw-dataset device,
+`xc7vx485tffg1761-2`.
+
+The RapidWright Python package is installed from the sibling local checkout:
+
+```bash
+uv sync
+```
+
+Build the ATAPP architecture cache once and write architecture-aware dataset
+copies:
+
+```bash
+cd hgp/data_process
+python3 gen_dataset_board.py --device xc7vx485tffg1761-2 --arch-mode atapp
+```
+
+This extracts the default board architecture into `dataset/board_arch/` and
+then reuses the existing CDFG samples to write `dataset/std_arch/` and
+`dataset/rdc_arch/`. The ATAPP tensor uses raw layout `[360,80,4]`,
+compressed layout `[360,1,4]`, and 21 metadata fields. The original `std` and
+`rdc` datasets are left unchanged.
+
 ## HGP
 ### Training
 HGP is trained for LUT/FF/DSP/BRAM/CP/Power prediction.
@@ -48,8 +74,81 @@ If you want to retrain HGP, run commands:
 1. cd hgp
 2. python3 hier_lut_model.py
 
+For RapidWright ATAPP-aware training, use:
+
+```bash
+cd hgp
+python3 hier_arch_model.py --target lut --arch-mode atapp
+```
+
+The ATAPP-aware trainer defaults to an edge-attribute-aware GINE design encoder,
+which is closer to the edge-aware UniMP design branch described by ATAPP than
+the legacy SAGE/GCN/GAT options.
+
+The previous full fabric graph path remains available with `--arch-mode fabric`.
+
+HGBO-DSE is currently configured with CPU PyTorch/PyG wheels, and the training
+CLIs default to CPU. Use `--cpu-threads` for PyTorch CPU compute threads, and
+keep DataLoader workers at zero to avoid multiprocessing overhead on the small
+HGBO-DSE datasets:
+
+```bash
+uv run python -m hgp.hier_arch_model \
+  --target lut \
+  --epochs 30 \
+  --lr 0.001 \
+  --grad-clip 1.0 \
+  --arch-mode atapp \
+  --device cpu \
+  --cpu-threads 16 \
+  --num-workers 0 \
+  --model-dir /tmp/hgbo_atapp_lut_cpu
+```
+
+For the full original-vs-ATAPP comparison on CPU:
+
+```bash
+PYTHONUNBUFFERED=1 uv run python -m hgp.reporting.compare_training_graphs \
+  --epochs 30 \
+  --lr 0.001 \
+  --grad-clip 1.0 \
+  --arch-mode atapp \
+  --device cpu \
+  --cpu-threads 16 \
+  --num-workers 0 \
+  --seeds 128 256 512 \
+  --output-dir img/training/atapp_multi_seed_cpu_threads16_workers0
+```
+
+The trainer prints `Using device cpu`, `Torch CPU threads: ...`, and
+`DataLoader workers: ...` at startup.
+
+The latest forced-CPU 30-epoch comparison uses 16 PyTorch CPU threads and
+`num_workers=0`; its summary and SVG training graphs are under
+`img/training/atapp_multi_seed_cpu_threads16_workers0/`.
+
 ### Inference
-The well-trained HGP models call the model parameters ('pt' files in "./hgp/model/") to run inference.
+The DSE `--mode hgp` inference path currently uses the original HGP prediction
+modules in `bome/pred/`. Those modules load fixed best-test checkpoint names
+from `./hgp/model/`:
+
+```text
+lut_h64_d0_checkpoint_test.pt
+ff_h64_d0_checkpoint_test.pt
+dsp_mae_h64_d0_checkpoint_test.pt
+bram_mae_h64_d0_checkpoint_test.pt
+cp_mean_h64_d0_checkpoint_test.pt
+power_mean_h64_d0_checkpoint_test.pt
+```
+
+Use the `*_checkpoint_test.pt` files for DSE. The
+`*_checkpoint_train.pt` files are selected by best training metric and are not
+the default inference weights.
+
+ATAPP-aware training writes `*_arch_h64_d0_checkpoint_*.pt` checkpoints with a
+different model structure and architecture inputs. Those weights are used for
+training/evaluation comparisons, but DSE will not select them until a dedicated
+architecture-aware inference path is added.
 
 ### HGP Prediction Visualization
 The following figures visualize the predicted values of HGP in terms of LUT, FF, DSP, BRAM, CP and Power.

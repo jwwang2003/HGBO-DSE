@@ -29,6 +29,45 @@ Verify the runtime imports:
 uv run python -c "import optuna, torch, torchvision, torchaudio, torch_geometric, torch_scatter, torch_sparse; print('HGBO deps OK')"
 ```
 
+HGBO-DSE is currently configured for CPU PyTorch/PyG wheels by default. Verify
+the active runtime with:
+
+```
+uv run python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.get_num_threads())"
+```
+
+Training defaults to CPU even if the environment is later changed back to CUDA
+wheels. Use `--cpu-threads` to set PyTorch CPU compute threads and
+`--num-workers` to control background DataLoader workers. For the bundled
+HGBO-DSE datasets, `--num-workers 0` avoids worker startup overhead and was
+faster than the attempted `--num-workers 4` CPU run:
+
+```
+uv run python -m hgp.hier_arch_model --target lut --epochs 1 --arch-mode atapp --device cpu --cpu-threads 16 --num-workers 0
+```
+
+The default architecture-aware design encoder is `--conv-type gine`, so design
+graph edge attributes participate in message passing. Pass `--conv-type sage`
+only when comparing against the legacy HGBO-style design encoder.
+
+RapidWright is resolved from the sibling checkout at `../RapidWright/python`.
+After `uv sync`, verify the local wrapper can be imported:
+
+```
+uv run python -c "import rapidwright; from com.xilinx.rapidwright.device import Device; print(Device)"
+```
+
+Build the reusable ATAPP architecture cache for the default dataset board:
+
+```
+uv run python -m hgp.data_process.gen_dataset_board --device xc7vx485tffg1761-2 --arch-mode atapp
+```
+
+The command keeps `dataset/std` and `dataset/rdc` intact, writes `std_arch` and
+`rdc_arch`, and stores the extracted RapidWright ATAPP layout under
+`dataset/board_arch`. The legacy full fabric graph cache can still be generated
+with `--arch-mode fabric`.
+
 ### Host DSE + host inference
 
 Run Vitis HLS and HGP model inference on the host:
@@ -36,6 +75,22 @@ Run Vitis HLS and HGP model inference on the host:
 ```
 uv run python -m bome.hls_dse --mode hgp --inference-mode host --case viterbi --ver viterbi --num 10 --isolated context1
 ```
+
+Host DSE inference currently uses the original fixed checkpoint names under
+`hgp/model/`:
+
+```
+lut_h64_d0_checkpoint_test.pt
+ff_h64_d0_checkpoint_test.pt
+dsp_mae_h64_d0_checkpoint_test.pt
+bram_mae_h64_d0_checkpoint_test.pt
+cp_mean_h64_d0_checkpoint_test.pt
+power_mean_h64_d0_checkpoint_test.pt
+```
+
+The ATAPP-aware training checkpoints use a different model input path and are
+not selected by DSE unless a dedicated architecture-aware inference path is
+added.
 
 ### Host DSE + MCP remote inference
 
