@@ -1,4 +1,7 @@
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.9
+    import tomli as tomllib
 from pathlib import Path
 
 
@@ -20,10 +23,12 @@ def test_pyproject_declares_hgbo_runtime_dependencies():
     assert "torch-geometric==2.6.0" in dependencies
     assert "torch-scatter==2.1.2" in dependencies
     assert "torch-sparse==0.6.18" in dependencies
+    assert "rapidwright" in dependencies
+    assert "jpype1==1.6.0" in dependencies
     assert "torch==2.6.0+cpu" not in dependencies
 
 
-def test_pyproject_routes_pytorch_and_pyg_wheels_to_uv_indexes():
+def test_pyproject_routes_pytorch_and_pyg_wheels_to_cpu_uv_indexes():
     pyproject = read_pyproject()
     sources = pyproject["tool"]["uv"]["sources"]
     indexes = {index["name"]: index for index in pyproject["tool"]["uv"]["index"]}
@@ -40,6 +45,14 @@ def test_pyproject_routes_pytorch_and_pyg_wheels_to_uv_indexes():
     assert indexes["pyg-torch-260-cpu"]["explicit"] is True
 
 
+def test_pyproject_routes_rapidwright_to_local_source():
+    pyproject = read_pyproject()
+    sources = pyproject["tool"]["uv"]["sources"]
+
+    assert sources["rapidwright"]["path"] == "../RapidWright/python"
+    assert sources["rapidwright"]["editable"] is True
+
+
 def test_dockerfile_and_docs_use_uv_sync():
     dockerfile = (ROOT / "Dockerfile").read_text()
     readme = (ROOT / "README.dev.md").read_text()
@@ -52,3 +65,13 @@ def test_dockerfile_and_docs_use_uv_sync():
     assert "uv pip install -r requirements.txt" not in readme
     assert "uv sync --no-install-project" in docker_readme
     assert "COPY requirements.txt" not in docker_readme
+
+
+def test_readme_mentions_rapidwright_cache_workflow():
+    readme = (ROOT / "README.md").read_text()
+    dev_readme = (ROOT / "README.dev.md").read_text()
+
+    assert "RapidWright" in readme
+    assert "std_arch" in readme
+    assert "rdc_arch" in readme
+    assert "dataset/board_arch" in dev_readme
