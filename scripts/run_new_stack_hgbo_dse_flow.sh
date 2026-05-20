@@ -28,6 +28,8 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 : "${MAPE_TARGETS:=lut ff cp power}"
 
 : "${BRAM_LOSS_WEIGHTING:=none}"
+: "${BRAM_TARGET_TRANSFORM:=none}"
+: "${BRAM_TRAIN_SAMPLER:=none}"
 : "${BRAM_POSITIVE_WEIGHT:=2}"
 : "${BRAM_MID_WEIGHT:=4}"
 : "${BRAM_HIGH_WEIGHT:=16}"
@@ -344,6 +346,8 @@ if [[ "$RUN_ORIGINAL_BRAM" == "1" ]]; then
     10 \
     0.001 \
     "" \
+    --target-transform "$BRAM_TARGET_TRANSFORM" \
+    --train-sampler "$BRAM_TRAIN_SAMPLER" \
     --loss-weighting "$BRAM_LOSS_WEIGHTING" \
     --bram-positive-weight "$BRAM_POSITIVE_WEIGHT" \
     --bram-mid-weight "$BRAM_MID_WEIGHT" \

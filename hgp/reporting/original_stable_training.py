@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import WeightedRandomSampler
 from torch_geometric.loader import DataLoader
 
 from bome.pred.checkpoint import load_pretrained_state_dict
@@ -27,7 +28,6 @@ from hgp.reporting.compare_training_graphs import (
     _set_cpu_threads,
     _set_seed,
     _target_values,
-    evaluate_original,
 )
 
 
@@ -130,6 +130,27 @@ def test_loader_options(args) -> dict:
     return {"shuffle": True, "drop_last": True}
 
 
+def transform_targets(true_y: torch.Tensor, args) -> torch.Tensor:
+    if args.target_transform == "none":
+        return true_y
+    if args.target_transform == "log1p":
+        return torch.log1p(true_y.clamp_min(0))
+    raise ValueError(f"Unknown target transform: {args.target_transform}")
+
+
+def metric_predictions(out: torch.Tensor, args) -> torch.Tensor:
+    if args.target_transform == "none":
+        return out
+    if args.target_transform == "log1p":
+        return torch.expm1(out).clamp_min(0)
+    raise ValueError(f"Unknown target transform: {args.target_transform}")
+
+
+def metric_value(out: torch.Tensor, true_y: torch.Tensor, metric_name: str, args) -> torch.Tensor:
+    metric_fn = _metric_fn(metric_name)
+    return metric_fn(metric_predictions(out, args), true_y).float()
+
+
 def loss_weights(true_y: torch.Tensor, args) -> torch.Tensor:
     weights = torch.ones_like(true_y, dtype=torch.float32)
     if args.loss_weighting == "none":
@@ -146,9 +167,45 @@ def loss_weights(true_y: torch.Tensor, args) -> torch.Tensor:
 
 
 def training_loss(out: torch.Tensor, true_y: torch.Tensor, args) -> torch.Tensor:
-    per_sample_loss = F.huber_loss(out, true_y, reduction="none").float()
+    transformed_true_y = transform_targets(true_y, args)
+    per_sample_loss = F.huber_loss(out, transformed_true_y, reduction="none").float()
     weights = loss_weights(true_y, args).to(device=per_sample_loss.device, dtype=per_sample_loss.dtype)
     return (per_sample_loss * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def train_sample_weights(dataset, spec, args) -> torch.Tensor | None:
+    if args.train_sampler == "none":
+        return None
+    if args.train_sampler not in {"bram-bucket-balanced", "bram-nonzero-balanced"}:
+        raise ValueError(f"Unknown train sampler: {args.train_sampler}")
+    if spec.name != "bram":
+        return None
+
+    true_y = torch.tensor([float(_target_values(data, spec).view(-1)[0].item()) for data in dataset], dtype=torch.float64)
+    weights = torch.zeros_like(true_y)
+    if args.train_sampler == "bram-nonzero-balanced":
+        bucket_masks = [true_y == 0, true_y > 0]
+    else:
+        bucket_masks = [
+            true_y == 0,
+            (true_y > 0) & (true_y <= 1),
+            (true_y > 1) & (true_y <= 10),
+            (true_y > 10) & (true_y <= 100),
+            true_y > 100,
+        ]
+    for mask in bucket_masks:
+        count = int(mask.sum().item())
+        if count > 0:
+            weights[mask] = 1.0 / count
+    return weights
+
+
+def make_train_loader(train_ds, spec, args, loader_kwargs):
+    sample_weights = train_sample_weights(train_ds, spec, args)
+    if sample_weights is None:
+        return DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+    return DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, drop_last=True, **loader_kwargs)
 
 
 def checkpoint_name(target: str, split: str) -> str:
@@ -171,6 +228,7 @@ def load_initial_checkpoint(model, checkpoint_path: Path, device) -> dict:
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "best_metric": checkpoint.get("best_metric") if isinstance(checkpoint, dict) else None,
         "legacy_metric": checkpoint.get("min_test_mae", checkpoint.get("min_test_mape")) if isinstance(checkpoint, dict) else None,
+        "settings": checkpoint.get("settings") if isinstance(checkpoint, dict) else None,
     }
 
 
@@ -212,7 +270,6 @@ def train_stable_original_epoch(
     counted_graphs = 0
     skipped_batches = 0
     skip_reasons = {}
-    metric_fn = _metric_fn(spec.metric_name)
     last_finite_state = fallback_state
 
     for data in loader:
@@ -229,7 +286,7 @@ def train_stable_original_epoch(
             continue
 
         loss = training_loss(out, true_y, args)
-        metric = metric_fn(out, true_y).float()
+        metric = metric_value(out, true_y, spec.metric_name, args)
         step = safe_optimizer_step(
             loss=loss,
             model=model,
@@ -259,6 +316,23 @@ def train_stable_original_epoch(
     )
 
 
+def evaluate_stable_original(model, loader, device, spec, epoch, args):
+    model.eval()
+    total_loss = 0.0
+    total_metric = 0.0
+    metric_name = spec.metric_name
+    with torch.no_grad():
+        for data in loader:
+            data = data.to(device)
+            out = model(data.x, data.edge_index, data.batch, data["hls_attr"], edge_attr=getattr(data, "edge_attr", None)).view(-1)
+            true_y = _target_values(data, spec)
+            loss = training_loss(out, true_y, args)
+            metric = metric_value(out, true_y, metric_name, args)
+            total_loss += loss.item() * data.num_graphs
+            total_metric += metric.item() * data.num_graphs
+    return total_loss / len(loader.dataset), total_metric / len(loader.dataset)
+
+
 def run_stable_original_target(target: str, args, device, output_dir: Path, split_cache=None):
     _set_seed(args.seed)
     spec = ORIGINAL_TARGET_SPECS[target]
@@ -266,7 +340,7 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
         split_cache = {}
     train_ds, test_ds = _get_split(split_cache, spec.dataset_subdir, args.seed)
     loader_kwargs = _loader_kwargs(args)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    train_loader = make_train_loader(train_ds, spec, args, loader_kwargs)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, **test_loader_options(args), **loader_kwargs)
     data_ini = _first_batch(train_loader)
     model = OriginalHierNet(
@@ -301,6 +375,8 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
         "lr_decay_interval": args.lr_decay_interval,
         "init_checkpoint": init_metadata,
         "deterministic_eval": args.deterministic_eval,
+        "target_transform": args.target_transform,
+        "train_sampler": args.train_sampler,
         "loss_weighting": args.loss_weighting,
         "bram_positive_weight": args.bram_positive_weight,
         "bram_mid_weight": args.bram_mid_weight,
@@ -314,8 +390,8 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
     last_finite_state = snapshot_model_state(model)
 
     if init_metadata is not None:
-        train_loss, train_metric = evaluate_original(model, train_loader, device, spec, -1)
-        test_loss, test_metric = evaluate_original(model, test_loader, device, spec, -1)
+        train_loss, train_metric = evaluate_stable_original(model, train_loader, device, spec, -1, args)
+        test_loss, test_metric = evaluate_stable_original(model, test_loader, device, spec, -1, args)
         if math.isfinite(train_metric):
             best_train_metric = train_metric
             checkpoints["train"] = save_checkpoint(
@@ -378,7 +454,7 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
         )
         if skipped_batches:
             print(f"{target} epoch {epoch}: skipped {skipped_batches} unstable batch(es): {skip_reasons}")
-        test_loss, test_metric = evaluate_original(model, test_loader, device, spec, epoch)
+        test_loss, test_metric = evaluate_stable_original(model, test_loader, device, spec, epoch, args)
         if should_decay_learning_rate(epoch=epoch, args=args):
             reduce_optimizer_lr(optimizer, args.lr_decay_factor)
         if math.isfinite(train_metric) and train_metric < best_train_metric:
@@ -491,6 +567,8 @@ def run(args):
             "init_from_builtins": args.init_from_builtins,
             "init_checkpoint_dir": str(args.init_checkpoint_dir) if args.init_checkpoint_dir else None,
             "deterministic_eval": args.deterministic_eval,
+            "target_transform": args.target_transform,
+            "train_sampler": args.train_sampler,
             "loss_weighting": args.loss_weighting,
             "bram_positive_weight": args.bram_positive_weight,
             "bram_mid_weight": args.bram_mid_weight,
@@ -531,6 +609,8 @@ def build_parser():
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--drop-out", type=float, default=0.0)
     parser.add_argument("--weight-decay", type=float, default=0.001)
+    parser.add_argument("--target-transform", choices=["none", "log1p"], default="none")
+    parser.add_argument("--train-sampler", choices=["none", "bram-bucket-balanced", "bram-nonzero-balanced"], default="none")
     parser.add_argument("--loss-weighting", choices=["none", "bram-tail"], default="none")
     parser.add_argument("--bram-positive-weight", type=float, default=2.0)
     parser.add_argument("--bram-mid-weight", type=float, default=4.0)

@@ -2,6 +2,7 @@ import pytest
 
 
 torch = pytest.importorskip("torch")
+Data = pytest.importorskip("torch_geometric.data").Data
 
 from hgp.reporting import original_stable_training as stable  # noqa: E402
 from hgp.reporting.checkpoint_prediction_stats import summarize_error_buckets, summarize_values  # noqa: E402
@@ -86,6 +87,102 @@ def test_training_loss_uses_normalized_weighted_huber_loss():
     expected_per_sample = torch.nn.functional.huber_loss(pred, true_y, reduction="none")
     expected = (expected_per_sample * torch.tensor([1.0, 10.0])).sum() / 11.0
     assert loss == pytest.approx(expected)
+
+
+def test_target_transform_defaults_to_identity():
+    args = stable.build_parser().parse_args([])
+    values = torch.tensor([0.0, 1.0, 10.0])
+
+    assert torch.equal(stable.transform_targets(values, args), values)
+    assert torch.equal(stable.metric_predictions(values, args), values)
+
+
+def test_log1p_target_transform_round_trips_predictions_and_clamps_negative_values():
+    args = stable.build_parser().parse_args(["--target-transform", "log1p"])
+    true_y = torch.tensor([0.0, 1.0, 10.0])
+    transformed = stable.transform_targets(true_y, args)
+
+    assert torch.allclose(transformed, torch.log1p(true_y))
+    assert torch.allclose(stable.metric_predictions(transformed, args), true_y)
+    assert stable.metric_predictions(torch.tensor([-2.0]), args).item() == pytest.approx(0.0)
+
+
+def test_training_loss_uses_target_transform_before_huber_loss():
+    args = stable.build_parser().parse_args(["--target-transform", "log1p"])
+    pred = torch.log1p(torch.tensor([0.0, 10.0]))
+    true_y = torch.tensor([0.0, 20.0])
+
+    loss = stable.training_loss(pred, true_y, args)
+
+    expected = torch.nn.functional.huber_loss(pred, torch.log1p(true_y), reduction="none").mean()
+    assert loss == pytest.approx(expected)
+
+
+def test_metric_values_use_inverse_transformed_predictions():
+    args = stable.build_parser().parse_args(["--target-transform", "log1p"])
+    pred = torch.log1p(torch.tensor([0.0, 10.0]))
+    true_y = torch.tensor([0.0, 20.0])
+
+    metric = stable.metric_value(pred, true_y, "mae", args)
+
+    assert metric == pytest.approx(torch.tensor(5.0))
+
+
+def _bram_sample(value):
+    y = torch.zeros((1, 8), dtype=torch.float32)
+    y[0, stable.ORIGINAL_TARGET_SPECS["bram"].target_index] = value
+    return Data(y=y)
+
+
+def test_train_sample_weights_default_to_none():
+    args = stable.build_parser().parse_args([])
+    dataset = [_bram_sample(0.0), _bram_sample(64.0)]
+
+    assert stable.train_sample_weights(dataset, stable.ORIGINAL_TARGET_SPECS["bram"], args) is None
+
+
+def test_bram_bucket_balanced_sampler_gives_each_present_bucket_equal_total_weight():
+    args = stable.build_parser().parse_args(["--train-sampler", "bram-bucket-balanced"])
+    dataset = [
+        _bram_sample(0.0),
+        _bram_sample(0.0),
+        _bram_sample(0.5),
+        _bram_sample(5.0),
+        _bram_sample(50.0),
+        _bram_sample(200.0),
+        _bram_sample(200.0),
+    ]
+
+    weights = stable.train_sample_weights(dataset, stable.ORIGINAL_TARGET_SPECS["bram"], args)
+
+    assert weights is not None
+    true_y = torch.tensor([0.0, 0.0, 0.5, 5.0, 50.0, 200.0, 200.0])
+    bucket_masks = [
+        true_y == 0,
+        (true_y > 0) & (true_y <= 1),
+        (true_y > 1) & (true_y <= 10),
+        (true_y > 10) & (true_y <= 100),
+        true_y > 100,
+    ]
+    bucket_totals = [weights[mask].sum().item() for mask in bucket_masks]
+    assert bucket_totals == pytest.approx([1.0, 1.0, 1.0, 1.0, 1.0])
+
+
+def test_bram_nonzero_balanced_sampler_gives_zero_and_nonzero_equal_total_weight():
+    args = stable.build_parser().parse_args(["--train-sampler", "bram-nonzero-balanced"])
+    dataset = [
+        _bram_sample(0.0),
+        _bram_sample(0.0),
+        _bram_sample(5.0),
+        _bram_sample(50.0),
+        _bram_sample(200.0),
+    ]
+
+    weights = stable.train_sample_weights(dataset, stable.ORIGINAL_TARGET_SPECS["bram"], args)
+
+    true_y = torch.tensor([0.0, 0.0, 5.0, 50.0, 200.0])
+    assert weights[true_y == 0].sum().item() == pytest.approx(1.0)
+    assert weights[true_y > 0].sum().item() == pytest.approx(1.0)
 
 
 def test_prediction_stats_summary_uses_population_std_and_quantiles():

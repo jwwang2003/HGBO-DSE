@@ -34,10 +34,14 @@ def test_new_stack_hgbo_dse_flow_script_has_original_and_arch_aware_stages():
     assert "RUN_REFERENCE_EVAL" in script
     assert "RUN_ORIGINAL_TARGETS" in script
     assert "RUN_ARCH_VERIFY" in script
+    assert "BRAM_TARGET_TRANSFORM" in script
+    assert "BRAM_TRAIN_SAMPLER" in script
     assert "hgp.reporting.original_stable_training" in script
     assert "hgp.reporting.compare_training_graphs" in script
     assert "--deterministic-eval" in script
     assert "--init-from-builtins" in script
+    assert "--target-transform \"$BRAM_TARGET_TRANSFORM\"" in script
+    assert "--train-sampler \"$BRAM_TRAIN_SAMPLER\"" in script
     assert "--arch-mode \"$ARCH_MODE\"" in script
     assert "flow_summary.csv" in script
     assert "Skipping non-empty output" in script

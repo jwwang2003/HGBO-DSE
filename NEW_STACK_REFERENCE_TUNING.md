@@ -55,14 +55,17 @@ Deterministic full-test comparison against the built-in checkpoints, using
 | LUT | MAPE | 0.085090 | 0.104430 | +0.019340 | 22.7% worse |
 | FF | MAPE | 0.041322 | 0.052320 | +0.010998 | 26.6% worse |
 | DSP | MAE | 0.408498 | 0.549132 | +0.140634 | 34.4% worse |
-| BRAM | MAE | 0.078283 | 1.035972 | +0.957689 | 13.23x worse |
+| BRAM | MAE | 0.078283 | 0.971820 | +0.893537 | 12.41x worse |
 | CP | MAPE | 0.046914 | 0.062653 | +0.015739 | 33.5% worse |
 | Power | MAPE | 0.075617 | 0.080316 | +0.004699 | 6.2% worse |
 
 Interpretation: excluding BRAM, the best new-stack checkpoints are roughly
 25% worse than the built-in checkpoints on average. Power is close; LUT/FF are
 usable but behind; DSP/CP remain meaningfully behind. BRAM dominates the
-remaining gap and is not close to built-in quality.
+remaining gap and is not close to built-in quality. The best BRAM number here
+comes from a low-LR nonzero-balanced fine-tune of the raw BRAM checkpoint; it is
+an improvement over the raw deterministic BRAM checkpoint (`1.040144`) but still
+far from the built-in reference (`0.078283`).
 
 Output directories:
 
@@ -70,6 +73,7 @@ Output directories:
 - DSP tuned 500-epoch run: `img/training/new_stack_legacy_from_scratch_dsp_seed128_lr002_wd0_decay095_500ep_20260519`
 - CP/power 500-epoch run: `img/training/new_stack_legacy_from_scratch_cp_power_seed128_lr005_wd0_decay095_500ep_20260519`
 - BRAM 500-epoch run: `img/training/new_stack_legacy_from_scratch_bram_seed128_lr001_wd1e3_decay09_500ep_20260519`
+- BRAM nonzero-balanced fine-tune: `img/training/new_stack_bram_finetune_nonzero_balanced_from_raw_seed128_lr0001_det_eval_100ep_20260520`
 - LUT/FF checkpoint re-evaluation: `img/training/new_stack_legacy_from_scratch_lut_ff_recovered_eval_20260519`
 
 Important evaluation caveat: the original HGBO-DSE loaders use `shuffle=True, drop_last=True` for the test loader. That paper-style behavior was preserved for comparison, but it means a saved best-test checkpoint can re-evaluate to a different number after reload because a different partial test subset may be dropped. In the interrupted LUT/FF run, checkpoint payloads recorded LUT `0.097270` and FF `0.050839`; the fresh paper-style re-evaluation reported LUT `0.104494` and FF `0.052637`. The table above uses the fresh re-evaluation numbers.

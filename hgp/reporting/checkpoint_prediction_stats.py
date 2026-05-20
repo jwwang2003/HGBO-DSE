@@ -20,7 +20,7 @@ from hgp.reporting.compare_training_graphs import (
     _set_seed,
     _target_values,
 )
-from hgp.reporting.original_stable_training import initial_checkpoint_path, load_initial_checkpoint
+from hgp.reporting.original_stable_training import initial_checkpoint_path, load_initial_checkpoint, metric_predictions
 
 
 def summarize_values(values: torch.Tensor) -> dict[str, float | int]:
@@ -40,19 +40,20 @@ def summarize_values(values: torch.Tensor) -> dict[str, float | int]:
     }
 
 
-def prediction_rows(model, loader, device, spec):
+def prediction_rows(model, loader, device, spec, args):
     model.eval()
     rows = []
     with torch.no_grad():
         for batch_idx, data in enumerate(loader):
             data = data.to(device)
-            pred = model(
+            raw_pred = model(
                 data.x,
                 data.edge_index,
                 data.batch,
                 data["hls_attr"],
                 edge_attr=getattr(data, "edge_attr", None),
             ).view(-1)
+            pred = metric_predictions(raw_pred, args)
             true = _target_values(data, spec)
             for item_idx, (true_value, pred_value) in enumerate(zip(true.detach().cpu(), pred.detach().cpu())):
                 rows.append(
@@ -119,8 +120,10 @@ def run(args):
     if checkpoint_path is None:
         raise ValueError("Pass --init-from-builtins or --init-checkpoint-dir")
     init_metadata = load_initial_checkpoint(model, checkpoint_path, device)
+    checkpoint_settings = init_metadata.get("settings") or {}
+    args.target_transform = checkpoint_settings.get("target_transform", "none")
 
-    rows = prediction_rows(model, test_loader, device, spec)
+    rows = prediction_rows(model, test_loader, device, spec, args)
     true = torch.tensor([row["true"] for row in rows], dtype=torch.float64)
     pred = torch.tensor([row["pred"] for row in rows], dtype=torch.float64)
     abs_error = torch.tensor([row["abs_error"] for row in rows], dtype=torch.float64)
@@ -134,6 +137,7 @@ def run(args):
             "cpu_threads": active_threads,
             "batch_size": args.batch_size,
             "checkpoint": init_metadata,
+            "target_transform": args.target_transform,
         },
         "true": summarize_values(true),
         "pred": summarize_values(pred),

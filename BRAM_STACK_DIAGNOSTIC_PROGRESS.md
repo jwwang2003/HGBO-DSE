@@ -379,3 +379,69 @@ Recommended commit grouping:
    SAGPooling shim, original-stack requirements, reproduction scripts, stable
    training/evaluation utilities, and tests.
 3. Experiment documentation and new-stack flow scripts.
+
+## Step 8: BRAM Target-Transform And Sampler Experiments
+
+Status: completed first pass.
+
+Trainer changes:
+
+- Added `--target-transform none|log1p`.
+  - Default `none` preserves previous behavior.
+  - `log1p` trains against `log1p(true_y)` but evaluates/checkpoints using
+    inverse-transformed predictions in original BRAM units.
+- Added `--train-sampler none|bram-bucket-balanced|bram-nonzero-balanced`.
+  - Default `none` preserves previous behavior.
+  - `bram-bucket-balanced` gives the five BRAM buckets equal total sampling
+    weight.
+  - `bram-nonzero-balanced` gives zero and nonzero BRAM examples equal total
+    sampling weight.
+- `checkpoint_prediction_stats.py` now honors checkpoint `target_transform`
+  metadata before computing residuals.
+
+Distribution check:
+
+| Split | Count | Zero | Nonzero | `10 < true <= 100` | `true > 100` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Train | 9062 | 7169 | 1893 | 995 | 23 |
+| Test | 2265 | 1791 | 474 | 238 | 5 |
+
+This confirms that the BRAM target is extremely zero-heavy, with a tiny high
+tail.
+
+Experiments:
+
+| Run | Command shape | Outcome |
+| --- | --- | --- |
+| Log1p target from scratch | 500 requested; stopped at epoch 17 | Bad trajectory. Best deterministic MAE `7.61339`; inverse transform produced early extreme MAE spikes. |
+| Bucket-balanced sampler from scratch | 200 requested; stopped at epoch 31 | Too aggressive. Best deterministic MAE `4.09534`; much worse than raw baseline. |
+| Nonzero-balanced sampler from scratch | 200 epochs completed | Better than bucket-balanced but still behind baseline. Best deterministic MAE `1.18267`. |
+| Nonzero-balanced fine-tune from raw BRAM checkpoint, `mae_lr=0.0002` | 100 requested; stopped after improvement was observed | Improved deterministic MAE from `1.04014` to `0.987521`. |
+| Nonzero-balanced fine-tune from raw BRAM checkpoint, `mae_lr=0.0001` | 100 epochs completed | Best so far: deterministic MAE `0.971820`. |
+
+Best new-stack BRAM comparison:
+
+| Checkpoint | Deterministic BRAM MAE | Median abs error | `true == 0` MAE | `10 < true <= 100` MAE | `true > 100` MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Built-in reference | 0.078283 | 0.004279 | 0.008963 | 0.343194 | 0.225299 |
+| Previous new-stack raw BRAM | 1.040144 | 0.011977 | 0.031307 | 7.281705 | 89.411124 |
+| Tail-weighted from scratch | 1.035972 | 0.059055 | 0.146472 | 6.281361 | 78.535291 |
+| Nonzero-balanced fine-tune, `mae_lr=0.0001` | 0.971820 | 0.020276 | 0.088340 | 6.379794 | 83.385342 |
+
+Interpretation:
+
+- The first real improvement is a two-stage recipe: train raw BRAM normally,
+  then fine-tune gently with nonzero-balanced sampling.
+- The improvement is modest: deterministic MAE improves by about `6.6%`
+  relative to the previous new-stack deterministic BRAM checkpoint.
+- It helps the important `10 < true <= 100` bucket but still damages zero-BRAM
+  predictions and does not solve the `true > 100` tail.
+- This is still far from built-in reference quality, so it should be reported as
+  progress on the new-stack reproduction problem, not as a paper-level fix.
+
+Next BRAM direction:
+
+The remaining gap likely needs a model/objective change that separates the
+zero/nonzero decision from positive-BRAM magnitude. The sampler results show
+that more nonzero exposure helps only when applied gently after a good baseline,
+but aggregate MAE is still too sensitive to harming the zero-heavy majority.
