@@ -1,6 +1,11 @@
 import subprocess
 from bome.log import setup_logger
 import os
+from bome.vivado_mcp import (
+    check_vivado_mcp_connection,
+    is_vivado_mcp_enabled,
+    run_vitis_hls_tcl,
+)
 
 class VitisHLSRunner:
     def __init__(self, tcl_script=None, timeout=3600, context:str=None, log_file='runtime.log', check=False):
@@ -27,6 +32,28 @@ class VitisHLSRunner:
         Captures stdout and stderr, and handles timeouts and errors.
         """
         try:
+            if is_vivado_mcp_enabled():
+                if self.check:
+                    self.log.info("Checking Vivado MCP connection...")
+                    result = check_vivado_mcp_connection(timeout=self.timeout)
+                else:
+                    self.log.info("Running Vitis HLS through Vivado MCP...")
+                    result = run_vitis_hls_tcl(
+                        self.tcl_script,
+                        context=self.context,
+                        timeout=self.timeout,
+                    )
+                self.process = result
+                self.stdout = result.stdout
+                self.stderr = result.stderr
+                if result.returncode == 0:
+                    self.log.info(self.stdout)
+                else:
+                    self.error = "Vivado MCP execution failed."
+                    self._log_error("[ERROR] Vivado MCP execution failed!")
+                    self.log.error(self.stderr)
+                return
+
             if self.check:
                 self.log.info("Checking if Vitis HLS is installed by checking the version...")
                 self.process = subprocess.run(
@@ -64,6 +91,9 @@ class VitisHLSRunner:
         except subprocess.SubprocessError as e:
             self.error = str(e)
             self._log_error(f"[ERROR] Subprocess error: {self.error}")
+        except Exception as e:
+            self.error = str(e)
+            self._log_error(f"[ERROR] Vitis HLS runner error: {self.error}")
     
     def _log_error(self, message):
         """
