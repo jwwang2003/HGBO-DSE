@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -7,8 +8,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from hgp.reporting.compare_training_graphs import (  # noqa: E402
+    ORIGINAL_CONV_TYPE,
+    OriginalHierNet,
     _get_split,
     _load_split,
+    _save_comparison_checkpoint,
     build_parser,
     build_consistency_summary,
     write_consistency_summary,
@@ -261,3 +265,113 @@ def test_compare_parser_defaults_to_cpu_training():
     args = build_parser().parse_args([])
 
     assert args.device == "cpu"
+
+
+def test_save_comparison_checkpoint_writes_reloadable_model_state(tmp_path):
+    args = build_parser().parse_args(["--output-dir", str(tmp_path)])
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    path = _save_comparison_checkpoint(
+        args=args,
+        model=model,
+        optimizer=optimizer,
+        target="lut",
+        variant="original",
+        split="test",
+        epoch=3,
+        metric_name="mape",
+        metric_value=0.123,
+        spec={"name": "lut", "target_index": 0},
+        extra_metadata={"conv_type": "sage"},
+    )
+
+    checkpoint_path = Path(path)
+    assert checkpoint_path == tmp_path / "checkpoints" / "lut_original_checkpoint_test.pt"
+    assert checkpoint_path.is_file()
+
+    loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert loaded["model"]
+    assert loaded["optimizer"]
+    assert loaded["target"] == "lut"
+    assert loaded["variant"] == "original"
+    assert loaded["split"] == "test"
+    assert loaded["epoch"] == 3
+    assert loaded["metric_name"] == "mape"
+    assert loaded["best_metric"] == pytest.approx(0.123)
+    assert loaded["spec"]["target_index"] == 0
+    assert loaded["conv_type"] == "sage"
+
+
+def test_original_comparison_path_matches_main_branch_hgbo_dse_defaults():
+    import hgp.reporting.compare_training_graphs as report
+
+    root = Path(__file__).resolve().parents[1]
+    main_lut = subprocess.run(
+        ["git", "show", "main:hgp/hier_lut_model.py"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    main_cp = subprocess.run(
+        ["git", "show", "main:hgp/hier_cp_model.py"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert "conv_type='sage'" in main_lut
+    assert "conv_type='sage'" in main_cp
+    assert ORIGINAL_CONV_TYPE == "sage"
+    assert report.ORIGINAL_TARGET_SPECS["lut"].dataset_subdir == "std"
+    assert report.ORIGINAL_TARGET_SPECS["lut"].hls_dim == 6
+    assert report.ORIGINAL_TARGET_SPECS["lut"].pool_mode == "add"
+    assert report.ORIGINAL_TARGET_SPECS["cp"].dataset_subdir == "rdc"
+    assert report.ORIGINAL_TARGET_SPECS["cp"].hls_dim == 1
+    assert report.ORIGINAL_TARGET_SPECS["cp"].pool_mode == "mean"
+
+
+def test_original_hiernet_state_dict_matches_main_branch_without_jumping_knowledge():
+    model = OriginalHierNet(
+        in_channels=15,
+        hidden_channels=64,
+        num_layers=3,
+        conv_type="sage",
+        hls_dim=6,
+        drop_out=0.0,
+    )
+
+    assert not any(key.startswith("jkn.") for key in model.state_dict())
+
+
+def test_run_original_target_instantiates_main_branch_sage_model(tmp_path, monkeypatch):
+    import hgp.reporting.compare_training_graphs as report
+
+    captured = {}
+
+    class FakeBatch:
+        num_features = 2
+        edge_attr = None
+
+    class FakeOriginalModel(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0]))
+            captured.update(kwargs)
+
+    monkeypatch.setattr(report, "_get_split", lambda cache, dataset_subdir, seed: ([object()] * 2, [object()] * 2))
+    monkeypatch.setattr(report, "_first_batch", lambda loader: FakeBatch())
+    monkeypatch.setattr(report, "OriginalHierNet", FakeOriginalModel)
+    monkeypatch.setattr(report, "train_original_epoch", lambda *args, **kwargs: (0.2, 0.2))
+    monkeypatch.setattr(report, "evaluate_original", lambda *args, **kwargs: (0.1, 0.1))
+
+    args = build_parser().parse_args(["--epochs", "1", "--output-dir", str(tmp_path), "--conv-type", "gine"])
+    history, checkpoints = report.run_original_target("lut", args, torch.device("cpu"), split_cache={})
+
+    assert captured["conv_type"] == "sage"
+    assert captured["hls_dim"] == 6
+    assert history[0]["best_test_metric"] == pytest.approx(0.1)
+    assert Path(checkpoints["train"]).is_file()
+    assert Path(checkpoints["test"]).is_file()

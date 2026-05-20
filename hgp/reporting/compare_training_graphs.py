@@ -14,14 +14,14 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn.dense import Linear
-from torch_geometric.nn.models import JumpingKnowledge
-from torch_geometric.nn.pool import SAGPooling, global_add_pool, global_max_pool, global_mean_pool
+from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool
 from torch.utils.data import random_split
 
 from hgp.arch_aware_arch import arch_aware_arch_to_device, ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
 from hgp.board_fabric import board_fabric_to_device, ensure_board_fabric_cache, load_board_fabric_cache
 from hgp.board_utils import DEFAULT_BOARD_DEVICE
 from hgp.dataset_utils import generate_dataset, mae_loss, mape_loss
+from hgp.pyg_compat import SAGPooling
 from hgp.hier_arch_model import (
     ARCH_AWARE_MODE,
     ArchAwareHierNet,
@@ -61,6 +61,7 @@ ORIGINAL_TARGET_SPECS = {
 }
 
 
+ORIGINAL_CONV_TYPE = "sage"
 TARGETS = ["lut", "ff", "dsp", "bram", "cp", "power"]
 COLOR_ORIGINAL_TRAIN = "#6b7280"
 COLOR_ORIGINAL_TEST = "#111827"
@@ -134,7 +135,6 @@ class OriginalHierNet(torch.nn.Module):
                 self.convs.append(_make_design_conv(conv_type, hidden_channels, hidden_channels, design_edge_dim))
             self.pools.append(SAGPooling(hidden_channels, self.pool_ratio))
 
-        self.jkn = JumpingKnowledge("lstm", channels=hidden_channels, num_layers=2)
         self.channels = [hidden_channels * 2 + hls_dim, 64, 64, 1]
         self.mlps = torch.nn.ModuleList()
         for idx in range(len(self.channels) - 1):
@@ -213,6 +213,44 @@ def _get_split(split_cache, dataset_subdir: str, seed: int):
     return split_cache[key]
 
 
+def _checkpoint_output_dir(args):
+    return Path(args.checkpoint_dir) if args.checkpoint_dir else Path(args.output_dir) / "checkpoints"
+
+
+def _save_comparison_checkpoint(
+    *,
+    args,
+    model,
+    optimizer,
+    target,
+    variant,
+    split,
+    epoch,
+    metric_name,
+    metric_value,
+    spec,
+    extra_metadata=None,
+):
+    checkpoint_dir = _checkpoint_output_dir(args)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_dir / "{}_{}_checkpoint_{}.pt".format(target, variant, split)
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "target": target,
+        "variant": variant,
+        "split": split,
+        "epoch": epoch,
+        "metric_name": metric_name,
+        "best_metric": metric_value,
+        "spec": spec,
+    }
+    if extra_metadata:
+        payload.update(extra_metadata)
+    torch.save(payload, checkpoint_path)
+    return str(checkpoint_path)
+
+
 def _first_batch(loader):
     for data in loader:
         return data
@@ -281,7 +319,7 @@ def run_original_target(target, args, device, split_cache=None):
         in_channels=data_ini.num_features,
         hidden_channels=args.hidden_channels,
         num_layers=args.num_layers,
-        conv_type=args.conv_type,
+        conv_type=ORIGINAL_CONV_TYPE,
         hls_dim=spec.hls_dim,
         design_edge_dim=data_ini.edge_attr.shape[-1] if getattr(data_ini, "edge_attr", None) is not None else None,
         pool_mode=spec.pool_mode,
@@ -289,6 +327,8 @@ def run_original_target(target, args, device, split_cache=None):
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history = []
+    checkpoint_paths = {}
+    best_train_metric = float("inf")
     best_test_metric = float("inf")
     for epoch in range(args.epochs):
         train_loss, train_metric = train_original_epoch(model, train_loader, optimizer, device, spec, epoch, args.grad_clip)
@@ -296,7 +336,48 @@ def run_original_target(target, args, device, split_cache=None):
         if epoch % 10 == 0:
             for group in optimizer.param_groups:
                 group["lr"] *= 0.9
+        if train_metric < best_train_metric:
+            best_train_metric = train_metric
+            checkpoint_paths["train"] = _save_comparison_checkpoint(
+                args=args,
+                model=model,
+                optimizer=optimizer,
+                target=target,
+                variant="original",
+                split="train",
+                epoch=epoch,
+                metric_name=spec.metric_name,
+                metric_value=best_train_metric,
+                spec=asdict(spec),
+                extra_metadata={
+                    "conv_type": ORIGINAL_CONV_TYPE,
+                    "hidden_channels": args.hidden_channels,
+                    "num_layers": args.num_layers,
+                    "drop_out": args.drop_out,
+                    "main_branch_reference": "hgp/hier_{}_model.py".format("pwr" if target == "power" else target),
+                },
+            )
         best_test_metric = min(best_test_metric, test_metric)
+        if test_metric <= best_test_metric:
+            checkpoint_paths["test"] = _save_comparison_checkpoint(
+                args=args,
+                model=model,
+                optimizer=optimizer,
+                target=target,
+                variant="original",
+                split="test",
+                epoch=epoch,
+                metric_name=spec.metric_name,
+                metric_value=best_test_metric,
+                spec=asdict(spec),
+                extra_metadata={
+                    "conv_type": ORIGINAL_CONV_TYPE,
+                    "hidden_channels": args.hidden_channels,
+                    "num_layers": args.num_layers,
+                    "drop_out": args.drop_out,
+                    "main_branch_reference": "hgp/hier_{}_model.py".format("pwr" if target == "power" else target),
+                },
+            )
         history.append(
             {
                 "epoch": epoch,
@@ -307,7 +388,19 @@ def run_original_target(target, args, device, split_cache=None):
                 "best_test_metric": best_test_metric,
             }
         )
-    return history
+    return history, checkpoint_paths
+
+
+def _arch_spec_metadata(spec):
+    return {
+        "name": spec.name,
+        "target_index": spec.target_index,
+        "dataset_subdir": spec.dataset_subdir,
+        "hls_dim": spec.hls_dim,
+        "pool_mode": spec.pool_mode,
+        "metric_name": spec.metric_name,
+        "label_scale": spec.label_scale,
+    }
 
 
 def run_arch_target(target, args, device, split_cache=None):
@@ -355,6 +448,8 @@ def run_arch_target(target, args, device, split_cache=None):
     board_training_input = _prepare_board_training_input(model, board_fabric, args.fabric_mode)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history = []
+    checkpoint_paths = {}
+    best_train_metric = float("inf")
     best_test_metric = float("inf")
     for epoch in range(args.epochs):
         train_loss, train_metric = train_arch_epoch(
@@ -379,7 +474,54 @@ def run_arch_target(target, args, device, split_cache=None):
         if epoch % 10 == 0:
             for group in optimizer.param_groups:
                 group["lr"] *= 0.9
+        if train_metric < best_train_metric:
+            best_train_metric = train_metric
+            checkpoint_paths["train"] = _save_comparison_checkpoint(
+                args=args,
+                model=model,
+                optimizer=optimizer,
+                target=target,
+                variant="architecture_aware",
+                split="train",
+                epoch=epoch,
+                metric_name=spec.metric_name,
+                metric_value=best_train_metric,
+                spec=_arch_spec_metadata(spec),
+                extra_metadata={
+                    "conv_type": args.conv_type,
+                    "hidden_channels": args.hidden_channels,
+                    "num_layers": args.num_layers,
+                    "drop_out": args.drop_out,
+                    "arch_mode": args.arch_mode,
+                    "fabric_mode": args.fabric_mode,
+                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "architecture_cache": str(cache_path),
+                },
+            )
         best_test_metric = min(best_test_metric, test_metric)
+        if test_metric <= best_test_metric:
+            checkpoint_paths["test"] = _save_comparison_checkpoint(
+                args=args,
+                model=model,
+                optimizer=optimizer,
+                target=target,
+                variant="architecture_aware",
+                split="test",
+                epoch=epoch,
+                metric_name=spec.metric_name,
+                metric_value=best_test_metric,
+                spec=_arch_spec_metadata(spec),
+                extra_metadata={
+                    "conv_type": args.conv_type,
+                    "hidden_channels": args.hidden_channels,
+                    "num_layers": args.num_layers,
+                    "drop_out": args.drop_out,
+                    "arch_mode": args.arch_mode,
+                    "fabric_mode": args.fabric_mode,
+                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "architecture_cache": str(cache_path),
+                },
+            )
         history.append(
             {
                 "epoch": epoch,
@@ -390,7 +532,7 @@ def run_arch_target(target, args, device, split_cache=None):
                 "best_test_metric": best_test_metric,
             }
         )
-    return history
+    return history, checkpoint_paths
 
 
 def _svg_escape(value) -> str:
@@ -773,6 +915,9 @@ def run_comparison(args):
             "cpu_threads": active_threads,
             "num_workers": args.num_workers,
             "weight_decay": args.weight_decay,
+            "original_conv_type": ORIGINAL_CONV_TYPE,
+            "arch_conv_type": args.conv_type,
+            "checkpoint_dir": str(_checkpoint_output_dir(args)),
             "arch_mode": args.arch_mode,
             "fabric_mode": args.fabric_mode,
             "device": str(device),
@@ -783,26 +928,20 @@ def run_comparison(args):
 
     for target in args.targets:
         print("Running target {}".format(target))
-        original_history = run_original_target(target, args, device, split_cache=split_cache)
-        arch_history = run_arch_target(target, args, device, split_cache=split_cache)
+        original_history, original_checkpoints = run_original_target(target, args, device, split_cache=split_cache)
+        arch_history, arch_checkpoints = run_arch_target(target, args, device, split_cache=split_cache)
         metric_name = ORIGINAL_TARGET_SPECS[target].metric_name
         results["targets"][target] = {
             "metric_name": metric_name,
             "original": {
                 "spec": asdict(ORIGINAL_TARGET_SPECS[target]),
+                "checkpoints": original_checkpoints,
                 "history": original_history,
                 "best_test_metric": min(item["test_metric"] for item in original_history),
             },
             "architecture_aware": {
-                "spec": {
-                    "name": ARCH_TARGET_SPECS[target].name,
-                    "target_index": ARCH_TARGET_SPECS[target].target_index,
-                    "dataset_subdir": ARCH_TARGET_SPECS[target].dataset_subdir,
-                    "hls_dim": ARCH_TARGET_SPECS[target].hls_dim,
-                    "pool_mode": ARCH_TARGET_SPECS[target].pool_mode,
-                    "metric_name": ARCH_TARGET_SPECS[target].metric_name,
-                    "label_scale": ARCH_TARGET_SPECS[target].label_scale,
-                },
+                "spec": _arch_spec_metadata(ARCH_TARGET_SPECS[target]),
+                "checkpoints": arch_checkpoints,
                 "history": arch_history,
                 "best_test_metric": min(item["test_metric"] for item in arch_history),
             },
@@ -863,6 +1002,7 @@ def build_parser():
     parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine")
     parser.add_argument("--drop-out", type=float, default=0.0)
     parser.add_argument("--weight-decay", type=float, default=0.001)
+    parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--output-dir", default=str(HGBO_ROOT / "img" / "training"))
     return parser
 

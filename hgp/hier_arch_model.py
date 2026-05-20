@@ -12,7 +12,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.nn.conv import GATConv, GCNConv, GINEConv, SAGEConv
 from torch_geometric.nn.dense import Linear
 from torch_geometric.nn.models import JumpingKnowledge
-from torch_geometric.nn.pool import SAGPooling, global_add_pool, global_max_pool, global_mean_pool
+from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool
 
 from hgp.arch_aware_arch import (
     ARCH_AWARE_LAYOUT_COLS,
@@ -25,6 +25,7 @@ from hgp.arch_aware_arch import (
 from hgp.board_fabric import board_fabric_to_device, ensure_board_fabric_cache, load_board_fabric_cache
 from hgp.board_utils import ARCH_ATTR_FIELDS, DEFAULT_BOARD_DEVICE
 from hgp.dataset_utils import generate_dataset, mae_loss, mape_loss, split_dataset
+from hgp.pyg_compat import SAGPooling
 
 
 TARGETS = ["lut", "ff", "dsp", "bram", "uram", "srl", "cp", "power"]
