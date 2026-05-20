@@ -5,7 +5,11 @@ import torch.nn.functional as F
 from torch_geometric.nn.conv import SAGEConv, GCNConv, GATConv
 from torch_geometric.nn.dense import Linear
 from torch_geometric.nn.models import JumpingKnowledge
-from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool, SAGPooling
+from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool
+try:
+    from hgp.pyg_compat import SAGPooling
+except ModuleNotFoundError:
+    from pyg_compat import SAGPooling
 
 
 target = ['lut', 'ff', 'dsp', 'bram', 'uram', 'srl', 'cp', 'power']

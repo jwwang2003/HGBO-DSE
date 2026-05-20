@@ -21,7 +21,7 @@ def mae_loss(output, target):
 
 def generate_dataset(dataset_dir, dataset_name_list, print_info=False):
     dataset_list = list()
-    for ds in dataset_name_list:
+    for ds in sorted(name for name in dataset_name_list if name.endswith(".pt")):
         ds_path = os.path.join(dataset_dir, ds)
         if os.path.isfile(ds_path):
             tem_data = torch.load(ds_path, weights_only=False)

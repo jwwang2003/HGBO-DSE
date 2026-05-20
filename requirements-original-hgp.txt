@@ -1,0 +1,13 @@
+--find-links https://download.pytorch.org/whl/cpu/torch_stable.html
+--find-links https://data.pyg.org/whl/torch-1.13.1+cpu.html
+
+torch==1.13.1+cpu
+torch-geometric==2.3.1
+torch-scatter==2.1.1
+torch-sparse==0.6.17
+optuna==3.2.0
+pyDOE==0.3.8
+numpy==1.26.3
+scikit-learn==1.6.1
+scipy==1.13.1
+matplotlib==3.9.4
