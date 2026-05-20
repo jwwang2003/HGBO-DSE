@@ -1,4 +1,20 @@
 __pycache__
+.pytest_cache/
+.venv/
+.venv113/
+
+# Generated HGBO-DSE datasets and architecture caches. Keep README files tracked.
+dataset/raw/*.zip
+dataset/std/*.pt
+dataset/rdc/*.pt
+dataset/std_arch/
+dataset/rdc_arch/
+dataset/board_arch/
+
+# Generated model/checkpoint and experiment outputs.
+model/
+img/training/
+img/reproduced_builtin*/
 
 benchmark/MachSuite/*/*/*
 dse_ds/MachSuite/*/*/*/p1
