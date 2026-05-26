@@ -35,7 +35,7 @@ DEVICE_ALIASES = {
     # VC707 / Virtex-7
     "xc7vx485t-ffg1761-2": DEFAULT_BOARD_DEVICE,
     # KCU105 / Kintex UltraScale
-    "xcku040-ffva1156-2-e": "xcku040_ffva1156_2_e",
+    "xcku040_ffva1156_2_e": "xcku040-ffva1156-2-e",
     # VCU118 / Virtex UltraScale+
     "xcvu9p_flga2104_2_i": "xcvu9p-flga2104-2-i",
     # ZCU102 / Zynq UltraScale+
@@ -95,8 +95,8 @@ _BOARD_PROFILES = {
         vccint=1.0,
     ),
     # KCU105 — Kintex UltraScale (xcku040), 20nm. 0.95V Vccint.
-    "xcku040_ffva1156_2_e": BoardProfile(
-        device="xcku040_ffva1156_2_e",
+    "xcku040-ffva1156-2-e": BoardProfile(
+        device="xcku040-ffva1156-2-e",
         family="kintex_ultrascale",
         lut_count=242400,
         ff_count=484800,
@@ -139,6 +139,20 @@ def normalize_device_name(device: str | None) -> str:
         return DEFAULT_BOARD_DEVICE
     normalized = str(device).strip()
     return DEVICE_ALIASES.get(normalized, normalized)
+
+
+def equivalent_device_names(device: str | None) -> tuple[str, ...]:
+    """Return canonical and alias spellings that may appear on disk."""
+    normalized = normalize_device_name(device)
+    names = [normalized]
+    if device:
+        requested = str(device).strip()
+        if requested and requested not in names:
+            names.append(requested)
+    for alias, canonical in DEVICE_ALIASES.items():
+        if canonical == normalized and alias not in names:
+            names.append(alias)
+    return tuple(names)
 
 
 def resolve_board_profile(device: str | None = None) -> BoardProfile:

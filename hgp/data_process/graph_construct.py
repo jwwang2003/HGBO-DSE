@@ -74,8 +74,11 @@ class CDFG:
     def parse_adb(self):
         listIRinfo = []
         listIRname = []
-        for IRfile in glob.glob(self.adb_folder + '/*.adb'):
-            IRname = (IRfile.split('/')[-1]).split('.')[0]
+        for IRfile in sorted(glob.glob(self.adb_folder + '/*.adb')):
+            fname = IRfile.split('/')[-1]
+            if '.bind.' in fname or '.sched.' in fname:
+                continue
+            IRname = fname.split('.')[0]
             IRinfo = cET.parse(IRfile).getroot()
             listIRname.append(IRname)
             listIRinfo.append(IRinfo)

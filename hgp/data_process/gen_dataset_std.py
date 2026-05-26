@@ -46,6 +46,8 @@ if str(_THIS_DIR) not in sys.path:
 if str(_HGBO_ROOT) not in sys.path:
     sys.path.insert(0, str(_HGBO_ROOT))
 
+from hgp.board_utils import normalize_device_name
+
 # Node feature sets matching the original HGBO-DSE convention.
 N_NUM_ITEMS_STD = ["m_delay", "latency", "bitwidth", "lut", "ff", "dsp"]
 N_NUM_ITEMS_RDC = ["m_delay", "latency"]
@@ -265,7 +267,7 @@ def _write_shards(
     total_rdc = 0
     all_keys = set(std_by_key.keys()) | set(rdc_by_key.keys())
     for bench, ver in sorted(all_keys):
-        device_key = device_override or ver
+        device_key = normalize_device_name(device_override or ver)
         if layout == "per_device":
             std_dir = output_root / device_key / "std"
             rdc_dir = output_root / device_key / "rdc"

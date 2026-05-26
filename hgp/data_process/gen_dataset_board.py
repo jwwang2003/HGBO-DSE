@@ -26,6 +26,7 @@ try:
     from hgp.board_fabric import ensure_board_fabric_cache
     from hgp.board_utils import (
         DEFAULT_BOARD_DEVICE,
+        equivalent_device_names,
         normalize_device_name,
         save_augmented_dataset,
     )
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - supports running from hgp/data_process
     from hgp.board_fabric import ensure_board_fabric_cache
     from hgp.board_utils import (
         DEFAULT_BOARD_DEVICE,
+        equivalent_device_names,
         normalize_device_name,
         save_augmented_dataset,
     )
@@ -65,7 +67,7 @@ def _augment_split(
     written flat under ``<output_root>/<split>_arch/<bench>.pt`` and re-runs
     for a different device overwrite the same files.
     """
-    input_dir = input_root / split
+    input_dir = _resolve_split_input_dir(input_root, split, device)
     if layout == "per_device":
         output_dir = output_root / normalize_device_name(device) / f"{split}_arch"
     elif layout == "legacy":
@@ -74,7 +76,7 @@ def _augment_split(
         raise ValueError("layout must be 'per_device' or 'legacy'; got {!r}".format(layout))
 
     written: list[Path] = []
-    if not input_dir.is_dir():
+    if input_dir is None:
         return written
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +85,16 @@ def _augment_split(
         save_augmented_dataset(input_path, output_path, device=device, arch_aware_arch=arch_aware_payload)
         written.append(output_path)
     return written
+
+
+def _resolve_split_input_dir(input_root: Path, split: str, device: str) -> Path | None:
+    """Find flat or per-device input shards for ``split`` and ``device``."""
+    candidates = [input_root / split]
+    candidates.extend(input_root / name / split for name in equivalent_device_names(device))
+    for candidate in candidates:
+        if candidate.is_dir() and any(candidate.glob("*.pt")):
+            return candidate
+    return None
 
 
 def augment_dataset_dirs(
@@ -133,13 +145,16 @@ def augment_dataset_dirs_multi(
     layout: str = "per_device",
 ) -> dict[str, dict[str, list[Path]]]:
     """Run :func:`augment_dataset_dirs` for each device, returning per-device results."""
-    if layout == "legacy" and len(devices) > 1:
+    normalized_devices = [normalize_device_name(device) for device in devices]
+    if layout == "legacy" and len(set(normalized_devices)) > 1:
         raise ValueError(
             "layout='legacy' clobbers shared output paths and cannot be used "
             "with more than one device; use layout='per_device' for multi-board runs."
         )
     results: dict[str, dict[str, list[Path]]] = {}
-    for device in devices:
+    for device in normalized_devices:
+        if device in results:
+            continue
         results[device] = augment_dataset_dirs(
             input_root,
             output_root,
