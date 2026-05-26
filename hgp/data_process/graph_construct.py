@@ -11,6 +11,9 @@ constFlag = 1  # whether extract const: 1/0
 blockFlag = 1  # whether extract block: 1/0
 plotFlag = 0  # whether draw cdfg graph: 1/0
 
+# Set HGBO_VERBOSE=1 to surface per-node debug prints during dataset generation.
+_VERBOSE = bool(int(os.environ.get("HGBO_VERBOSE", "0")))
+
 # core name of double operation
 coreList = ['DAddSub_nodsp', 'DAddSub_fulldsp', 'DMul_nodsp', 'DMul_fulldsp', 'DMul_maxdsp', 'DDiv', 'DCompare']
 opList = ['dadd', 'dsub', 'dmul', 'ddiv', 'dcmp']
@@ -531,9 +534,11 @@ class CDFG:
                                 node.rtl_name = rtl_name_real
                                 break
                     if node.rtl_name == 'not_exist':
-                        print('Core exists but no rtl module! --> ' + node_id)
+                        if _VERBOSE:
+                            print('Core exists but no rtl module! --> ' + node_id)
                 else:
-                    print('Check if the core name is ignored! --> ' + core_name)
+                    if _VERBOSE:
+                        print('Check if the core name is ignored! --> ' + core_name)
 
     def fix_func_call(self):
         for node_id in self.call_dict:
@@ -554,7 +559,8 @@ class CDFG:
                                 self.cdfg_node_dict[node_id].rtl_name = rtl_name
                                 break
                 if rtl_name == 'not_exist':
-                    print('Failed to match rtl_name!')
+                    if _VERBOSE:
+                        print('Failed to match rtl_name!')
             # elif tag != 'grp':
             #     print('Mistake in rtl_name: not_grp but ' + rtl_name)
 
@@ -728,7 +734,8 @@ class CDFG:
                                         line_num=block.line_num, rtl_name=block.rtl_name, op_type=block.op_type,
                                         node_objs=block.node_objs)
         else:
-            print('Basic Blocks Are Ignored!')
+            if _VERBOSE:
+                print('Basic Blocks Are Ignored!')
 
         # consts are necessary
         if constFlag:
@@ -741,7 +748,8 @@ class CDFG:
                                         line_num=const.line_num, rtl_name=const.rtl_name, op_type=const.op_type,
                                         bitwidth=const.bitwidth, const_type=const.const_type, content=const.content)
         else:
-            print("Merge Consts to Other Nodes")
+            if _VERBOSE:
+                print("Merge Consts to Other Nodes")
             for node_id in self.cdfg_const_dict:
                 if node_id in G.nodes():
                     for v in G.neighbors(node_id):
