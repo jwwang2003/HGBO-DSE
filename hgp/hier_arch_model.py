@@ -33,6 +33,12 @@ from hgp.dataset_utils import (
     mape_loss,
     split_dataset,
 )
+from hgp.feature_normalization import (
+    apply_feature_stats,
+    compute_feature_stats,
+    stats_from_jsonable,
+    stats_to_jsonable,
+)
 from hgp.multi_board import (
     board_devices_for_batch,
     dispatch_arch_aware_payload,
@@ -354,6 +360,69 @@ def _target_values(data, spec):
     return data["y"].t()[spec.target_index] * spec.label_scale
 
 
+def _runtime_target_scale(args):
+    return float(getattr(args, "_target_scale", 1.0) or 1.0)
+
+
+def _transform_target(true_y, args):
+    scale = _runtime_target_scale(args)
+    if scale != 1.0:
+        true_y = true_y / scale
+    if args.target_transform == "none":
+        return true_y
+    if args.target_transform == "log1p":
+        return torch.log1p(true_y.clamp_min(0))
+    raise ValueError("Unknown target transform: {}".format(args.target_transform))
+
+
+def _apply_hls_residual(out, hls_attr, args, spec):
+    if args.hls_residual_index is None:
+        return out
+    if args.target_transform != "none":
+        raise ValueError("--hls-residual-index is only supported with --target-transform none")
+    if getattr(args, "normalize_features", False):
+        raise ValueError("--hls-residual-index is incompatible with --normalize-features (residual reads raw hls_attr)")
+    if hls_attr is None:
+        raise ValueError("--hls-residual-index requires hls_attr")
+    if args.hls_residual_index < 0 or args.hls_residual_index >= hls_attr.size(-1):
+        raise ValueError(
+            "--hls-residual-index {} out of range for hls_attr width {}".format(
+                args.hls_residual_index, hls_attr.size(-1)
+            )
+        )
+    base = hls_attr[:, args.hls_residual_index].to(device=out.device, dtype=out.dtype)
+    if spec.label_scale != 1.0:
+        base = base * spec.label_scale
+    return out + base.view_as(out)
+
+
+def _metric_predictions(out, hls_attr, args, spec):
+    out = _apply_hls_residual(out, hls_attr, args, spec)
+    if args.target_transform == "log1p":
+        out = torch.expm1(out.clamp(max=14.0)).clamp_min(0)
+    scale = _runtime_target_scale(args)
+    if scale != 1.0:
+        out = out * scale
+    return out
+
+
+def _initialize_hls_residual_head(model, args, train_ds=None, spec=None):
+    if args.hls_residual_index is None and args.target_transform == "none":
+        return
+    final_layer = model.mlps[-1]
+    torch.nn.init.zeros_(final_layer.weight)
+    if final_layer.bias is None:
+        return
+    if args.target_transform == "log1p" and train_ds is not None and spec is not None:
+        ys = torch.stack(
+            [_target_values(s, spec).view(-1).float().mean() for s in train_ds]
+        )
+        bias_value = torch.log1p(ys.mean().clamp_min(0)).item()
+        final_layer.bias.data.fill_(bias_value)
+        return
+    torch.nn.init.zeros_(final_layer.bias)
+
+
 def _ensure_finite_tensor(value, name, phase, epoch=None, batch_idx=None):
     if not torch.is_tensor(value):
         value = torch.as_tensor(value)
@@ -420,11 +489,24 @@ def _attach_multi_board_caches(
     model._fabric_caches = fabric_caches or {}
 
 
-def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, epoch=0, grad_clip=None):
+def _apply_warmup(optimizer, args, epoch, batch_idx, batches_per_epoch):
+    if args.warmup_batches <= 0:
+        return
+    global_batch = epoch * batches_per_epoch + batch_idx
+    if global_batch >= args.warmup_batches:
+        return
+    scale = (global_batch + 1) / args.warmup_batches
+    for group in optimizer.param_groups:
+        group["lr"] = args.lr * scale
+
+
+def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, args, epoch=0, grad_clip=None):
     model.train()
     total_loss = 0
     total_metric = 0
+    batches_per_epoch = len(train_loader)
     for batch_idx, data in enumerate(train_loader):
+        _apply_warmup(optimizer, args, epoch, batch_idx, batches_per_epoch)
         data = data.to(device)
         optimizer.zero_grad()
         arch_input = _architecture_input_from_batch(model, data, board_embedding)
@@ -443,8 +525,12 @@ def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, e
         true_y = _target_values(data, spec)
         _ensure_finite_tensor(out, "model output", "training", epoch, batch_idx)
         _ensure_finite_tensor(true_y, "target", "training", epoch, batch_idx)
-        loss = F.huber_loss(out, true_y).float()
-        metric = spec.metric_fn(out, true_y).float()
+        hls_attr = data["hls_attr"]
+        out_residual = _apply_hls_residual(out, hls_attr, args, spec)
+        transformed_y = _transform_target(true_y, args)
+        loss = F.huber_loss(out_residual, transformed_y).float()
+        pred_for_metric = _metric_predictions(out, hls_attr, args, spec)
+        metric = spec.metric_fn(pred_for_metric, true_y).float()
         _ensure_finite_tensor(loss, "loss", "training", epoch, batch_idx)
         _ensure_finite_tensor(metric, "{} metric".format(spec.metric_name), "training", epoch, batch_idx)
         loss.backward()
@@ -458,7 +544,7 @@ def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, e
     return total_loss / len(ds), total_metric / len(ds)
 
 
-def evaluate(model, loader, device, spec, board_embedding, epoch=0, print_predictions=False):
+def evaluate(model, loader, device, spec, board_embedding, args, epoch=0, print_predictions=False):
     model.eval()
     with torch.no_grad():
         loss = 0
@@ -481,14 +567,18 @@ def evaluate(model, loader, device, spec, board_embedding, epoch=0, print_predic
             true_y = _target_values(data, spec)
             _ensure_finite_tensor(out, "model output", "evaluation", epoch, batch_idx)
             _ensure_finite_tensor(true_y, "target", "evaluation", epoch, batch_idx)
-            batch_loss = F.huber_loss(out, true_y).float()
-            batch_metric = spec.metric_fn(out, true_y).float()
+            hls_attr = data["hls_attr"]
+            out_residual = _apply_hls_residual(out, hls_attr, args, spec)
+            transformed_y = _transform_target(true_y, args)
+            batch_loss = F.huber_loss(out_residual, transformed_y).float()
+            pred_for_metric = _metric_predictions(out, hls_attr, args, spec)
+            batch_metric = spec.metric_fn(pred_for_metric, true_y).float()
             _ensure_finite_tensor(batch_loss, "loss", "evaluation", epoch, batch_idx)
             _ensure_finite_tensor(batch_metric, "{} metric".format(spec.metric_name), "evaluation", epoch, batch_idx)
             loss += batch_loss.item() * data.num_graphs
             metric += batch_metric.item() * data.num_graphs
             if print_predictions and epoch % 10 == 0:
-                print("pred.y:", out / spec.label_scale)
+                print("pred.y:", pred_for_metric / spec.label_scale)
                 print("data.y:", true_y / spec.label_scale)
         ds = loader.dataset
         return loss / len(ds), metric / len(ds)
@@ -618,6 +708,44 @@ def run_training(args):
         val_ds = None
         print("train_ds size = {}, test_ds size = {}".format(len(train_ds), len(test_ds)))
 
+    feature_stats = None
+    init_payload_stats = None
+    init_payload_target_scale = None
+    if args.init_checkpoint:
+        init_payload = torch.load(args.init_checkpoint, map_location="cpu", weights_only=False)
+        if isinstance(init_payload, dict):
+            init_payload_stats = stats_from_jsonable(init_payload.get("feature_stats"))
+            init_payload_target_scale = init_payload.get("target_scale")
+    if args.normalize_features:
+        if init_payload_stats is not None:
+            feature_stats = init_payload_stats
+            print("Reusing feature stats from --init-checkpoint")
+        else:
+            feature_stats = compute_feature_stats(list(train_ds))
+        apply_feature_stats(train_ds, feature_stats)
+        if val_ds is not None and len(val_ds) > 0:
+            apply_feature_stats(val_ds, feature_stats)
+        apply_feature_stats(test_ds, feature_stats)
+        print(
+            "Feature normalization: x[{}] hls_attr[{}]".format(
+                tuple(feature_stats["x_mean"].shape),
+                tuple(feature_stats["hls_attr_mean"].shape),
+            )
+        )
+
+    target_scale = 1.0
+    if args.normalize_target:
+        if init_payload_target_scale is not None:
+            target_scale = float(init_payload_target_scale)
+            print("Reusing target scale from --init-checkpoint: {:.4f}".format(target_scale))
+        else:
+            train_targets = torch.stack(
+                [_target_values(s, spec).view(-1).float().mean() for s in train_ds]
+            )
+            target_scale = max(float(train_targets.mean().item()), 1.0)
+            print("Target scale (mean train y): {:.4f}".format(target_scale))
+    args._target_scale = target_scale
+
     loader_kwargs = _loader_kwargs(args)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, drop_last=False, **loader_kwargs)
@@ -680,6 +808,8 @@ def run_training(args):
     if args.init_checkpoint:
         payload = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(_checkpoint_state(payload))
+    else:
+        _initialize_hls_residual_head(model, args, train_ds=train_ds, spec=spec)
     if multi_board:
         _attach_multi_board_caches(
             model, arch_caches=arch_caches, fabric_caches=fabric_caches
@@ -702,8 +832,8 @@ def run_training(args):
     history = []
     checkpoint_paths = {}
     if args.epochs == 0:
-        train_loss, train_metric = evaluate(model, train_loader, device, spec, board_training_input, epoch=-1)
-        test_loss, test_metric = evaluate(model, test_loader, device, spec, board_training_input, epoch=-1)
+        train_loss, train_metric = evaluate(model, train_loader, device, spec, board_training_input, args, epoch=-1)
+        test_loss, test_metric = evaluate(model, test_loader, device, spec, board_training_input, args, epoch=-1)
         min_train_metric = train_metric
         min_test_metric = test_metric
         history.append(
@@ -725,6 +855,7 @@ def run_training(args):
             device,
             spec,
             board_training_input,
+            args,
             epoch=epoch,
             grad_clip=args.grad_clip,
         )
@@ -734,6 +865,7 @@ def run_training(args):
             device,
             spec,
             board_training_input,
+            args,
             epoch,
             print_predictions=args.print_predictions,
         )
@@ -769,6 +901,8 @@ def run_training(args):
                     "fabric_mode": args.fabric_mode,
                     "arch_attr_fields": ARCH_ATTR_FIELDS,
                     "architecture_cache": str(cache_path),
+                    "feature_stats": stats_to_jsonable(feature_stats),
+                    "target_scale": target_scale,
                 },
                 os.path.join(model_dir, _checkpoint_name(spec, "train")),
             )
@@ -790,6 +924,8 @@ def run_training(args):
                     "fabric_mode": args.fabric_mode,
                     "arch_attr_fields": ARCH_ATTR_FIELDS,
                     "architecture_cache": str(cache_path),
+                    "feature_stats": stats_to_jsonable(feature_stats),
+                    "target_scale": target_scale,
                 },
                 os.path.join(model_dir, _checkpoint_name(spec, "test")),
             )
@@ -814,6 +950,8 @@ def run_training(args):
         "metric_name": spec.metric_name,
         "checkpoints": checkpoint_paths,
         "history": history,
+        "feature_stats": stats_to_jsonable(feature_stats),
+        "target_scale": target_scale,
         "settings": {
             **_jsonable_settings(args),
             "active_cpu_threads": active_threads,
@@ -858,7 +996,7 @@ def build_parser():
     parser.add_argument("--model-dir", default="./model", help="directory for model checkpoints")
     parser.add_argument("--epochs", type=int, default=500, help="number of training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="samples per batch")
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="torch device")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="cpu", help="torch device")
     parser.add_argument("--cpu-threads", type=int, default=None, help="limit torch CPU threads")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
     parser.add_argument("--hidden-channels", type=int, default=64, help="design GNN hidden size")
@@ -902,6 +1040,36 @@ def build_parser():
         type=float,
         default=0.1,
         help="fraction of training data reserved for in-distribution validation (board-out mode)",
+    )
+    parser.add_argument(
+        "--target-transform",
+        choices=["none", "log1p"],
+        default="none",
+        help="optional output transform; log1p compresses LUT/FF dynamic range",
+    )
+    parser.add_argument(
+        "--hls-residual-index",
+        type=int,
+        default=None,
+        help="if set, predict residual on top of hls_attr[:, idx] (e.g. 0 for HLS LUT estimate); not compatible with --target-transform",
+    )
+    parser.add_argument(
+        "--normalize-features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="z-score data.x and data.hls_attr using train-split statistics",
+    )
+    parser.add_argument(
+        "--normalize-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="divide the regression target by mean(train_y) so the head learns ~unit-scale outputs",
+    )
+    parser.add_argument(
+        "--warmup-batches",
+        type=int,
+        default=0,
+        help="ramp LR linearly from 0 to --lr over this many batches at training start (0 disables)",
     )
     return parser
 
