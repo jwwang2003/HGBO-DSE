@@ -624,80 +624,74 @@ class CDFG:
                 self.G.add_edge(node_id, dst_const, edge_id='0', edge_type='0', is_back_edge='0')
 
     def bypass_op(self):
-        rm_node_list = list()
+        G = self.G
+        nodes = G.nodes
+        bypassSet = frozenset(bypassList)
 
-        for node_id in self.G.nodes:
-            node_type = self.G.nodes[node_id]['node_type']
-            if int(node_type) == 0:  # node
-                opcode = self.G.nodes[node_id]['opcode']
-                if opcode in bypassList:
-                    for pre_id in list(self.G.predecessors(node_id)):
-                        for suc_id in list(self.G.successors(node_id)):
-                            if self.G.has_edge(pre_id, suc_id):
-                                pass
-                            else:
-                                edge = self.G[pre_id][node_id]
-                                edge_id = edge['edge_id']
-                                edge_type = edge['edge_type']
-                                is_back_edge = edge['is_back_edge']
-                                self.G.add_edge(pre_id, suc_id, edge_id=edge_id, edge_type=edge_type,
-                                                is_back_edge=is_back_edge)
-                    rm_node_list.append(node_id)
-                elif opcode == 'bitselect' or opcode == 'partselect':
-                    rtl_name = self.G.nodes[node_id]['rtl_name']
-                    if 'reg' not in rtl_name:
-                        for pre_id in list(self.G.predecessors(node_id)):
-                            for suc_id in list(self.G.successors(node_id)):
-                                if self.G.has_edge(pre_id, suc_id):
-                                    pass
-                                else:
-                                    edge = self.G[pre_id][node_id]
-                                    edge_id = edge['edge_id']
-                                    edge_type = edge['edge_type']
-                                    is_back_edge = edge['is_back_edge']
-                                    self.G.add_edge(pre_id, suc_id, edge_id=edge_id, edge_type=edge_type,
-                                                    is_back_edge=is_back_edge)
-                        rm_node_list.append(node_id)
-                # elif opcode == 'load' or opcode == 'store' or opcode == 'shl':
+        # Step 1: identify all bypass nodes in one pass.
+        is_bypass = set()
+        for node_id in G.nodes:
+            node_type = nodes[node_id]['node_type']
+            if int(node_type) == 0:
+                opcode = nodes[node_id]['opcode']
+                if opcode in bypassSet:
+                    is_bypass.add(node_id)
+                elif opcode in ('bitselect', 'partselect'):
+                    if 'reg' not in nodes[node_id]['rtl_name']:
+                        is_bypass.add(node_id)
                 elif opcode == 'shl':
-                    core_name = self.G.nodes[node_id]['core_name']
-                    if core_name == 'not_exist':
-                        for pre_id in list(self.G.predecessors(node_id)):
-                            for suc_id in list(self.G.successors(node_id)):
-                                if self.G.has_edge(pre_id, suc_id):
-                                    pass
-                                else:
-                                    edge = self.G[pre_id][node_id]
-                                    edge_id = edge['edge_id']
-                                    edge_type = edge['edge_type']
-                                    is_back_edge = edge['is_back_edge']
-                                    self.G.add_edge(pre_id, suc_id, edge_id=edge_id, edge_type=edge_type,
-                                                    is_back_edge=is_back_edge)
-                        rm_node_list.append(node_id)
-            elif int(node_type) == 2 or int(node_type) == 3:  # const or block
-                for pre_id in list(self.G.predecessors(node_id)):
-                    for suc_id in list(self.G.successors(node_id)):
-                        if self.G.has_edge(pre_id, suc_id):
-                            pass
-                        else:
-                            edge = self.G[pre_id][node_id]
-                            edge_id = edge['edge_id']
-                            edge_type = edge['edge_type']
-                            is_back_edge = edge['is_back_edge']
-                            self.G.add_edge(pre_id, suc_id, edge_id=edge_id, edge_type=edge_type,
-                                            is_back_edge=is_back_edge)
-                rm_node_list.append(node_id)
+                    if nodes[node_id]['core_name'] == 'not_exist':
+                        is_bypass.add(node_id)
+            elif int(node_type) == 2 or int(node_type) == 3:
+                is_bypass.add(node_id)
 
-        self.G.remove_nodes_from(rm_node_list)
+        # Step 2: for each non-bypass node u, trace through any bypass
+        # successor chains to find all reachable non-bypass targets.
+        # Edge attributes come from the first hop (u → first bypass node),
+        # matching the original cascading behaviour.
+        adj = G._adj
+        new_edges = []
+        for u in G.nodes:
+            if u in is_bypass:
+                continue
+            for v in list(adj[u]):
+                if v not in is_bypass:
+                    continue
+                edge_data = adj[u][v]
+                attrs = {
+                    'edge_id': edge_data['edge_id'],
+                    'edge_type': edge_data['edge_type'],
+                    'is_back_edge': edge_data['is_back_edge'],
+                }
+                # BFS from v through bypass-only nodes.
+                visited = set()
+                queue = [v]
+                while queue:
+                    cur = queue.pop()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
+                    for w in adj[cur]:
+                        if w in is_bypass:
+                            queue.append(w)
+                        elif w != u:
+                            new_edges.append((u, w, dict(attrs)))
+
+        G.add_edges_from(new_edges)
+        G.remove_nodes_from(is_bypass)
 
     def construct_graph(self, save_path):
         G = nx.DiGraph()
-        # find edges and build the graph
-        # print("Adding Edges")
-        for edge_id in self.cdfg_edge_dict:
-            edge = self.cdfg_edge_dict[edge_id]
-            G.add_edge(edge.source, edge.sink, edge_id=edge.edge_id, edge_type=edge.edge_type,
-                       is_back_edge=edge.is_back)
+        # batch-add edges
+        edge_list = [
+            (edge.source, edge.sink, {
+                'edge_id': edge.edge_id,
+                'edge_type': edge.edge_type,
+                'is_back_edge': edge.is_back,
+            })
+            for edge in self.cdfg_edge_dict.values()
+        ]
+        G.add_edges_from(edge_list)
 
         # add node attributes
         # print("Adding Nodes")
