@@ -1,3 +1,21 @@
+"""Augment HGBO-DSE PyG datasets with one or more FPGA architecture profiles.
+
+Inputs are the raw HLS-derived PyG sample shards under ``<input_root>/std/``
+and ``<input_root>/rdc/``. For each ``--device`` requested, the script:
+
+  1. Ensures the RapidWright-derived arch-aware cache (and, optionally, the
+     fabric-graph cache) for that device exists under ``<cache-dir>``.
+  2. Loads each sample shard, attaches the board profile + arch tensors via
+     :func:`hgp.board_utils.augment_dataset`, and writes the augmented shards.
+
+By default the augmented shards are written under
+``<output_root>/<device>/std_arch/`` and ``<output_root>/<device>/rdc_arch/``.
+This per-device layout is required when training across multiple boards: the
+legacy single-device layout (``<output_root>/std_arch/``) overwrites between
+runs and is no longer the default. Pass ``--legacy-layout`` to opt back into
+the flat layout for backwards-compatible single-device experiments.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -6,7 +24,11 @@ from pathlib import Path
 try:
     from hgp.arch_aware_arch import ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
     from hgp.board_fabric import ensure_board_fabric_cache
-    from hgp.board_utils import DEFAULT_BOARD_DEVICE, save_augmented_dataset
+    from hgp.board_utils import (
+        DEFAULT_BOARD_DEVICE,
+        normalize_device_name,
+        save_augmented_dataset,
+    )
 except ImportError:  # pragma: no cover - supports running from hgp/data_process
     import os
     import sys
@@ -14,7 +36,11 @@ except ImportError:  # pragma: no cover - supports running from hgp/data_process
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
     from hgp.arch_aware_arch import ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
     from hgp.board_fabric import ensure_board_fabric_cache
-    from hgp.board_utils import DEFAULT_BOARD_DEVICE, save_augmented_dataset
+    from hgp.board_utils import (
+        DEFAULT_BOARD_DEVICE,
+        normalize_device_name,
+        save_augmented_dataset,
+    )
 
 
 HGBO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,9 +54,25 @@ def _augment_split(
     split: str,
     device: str,
     arch_aware_payload: dict[str, object] | None,
+    *,
+    layout: str = "per_device",
 ) -> list[Path]:
+    """Augment one ``std`` or ``rdc`` split for a single ``device``.
+
+    With ``layout='per_device'`` (the default), augmented shards are written
+    under ``<output_root>/<device>/<split>_arch/<bench>.pt`` so that multiple
+    devices can coexist in one tree. With ``layout='legacy'`` the shards are
+    written flat under ``<output_root>/<split>_arch/<bench>.pt`` and re-runs
+    for a different device overwrite the same files.
+    """
     input_dir = input_root / split
-    output_dir = output_root / f"{split}_arch"
+    if layout == "per_device":
+        output_dir = output_root / normalize_device_name(device) / f"{split}_arch"
+    elif layout == "legacy":
+        output_dir = output_root / f"{split}_arch"
+    else:
+        raise ValueError("layout must be 'per_device' or 'legacy'; got {!r}".format(layout))
+
     written: list[Path] = []
     if not input_dir.is_dir():
         return written
@@ -52,7 +94,13 @@ def augment_dataset_dirs(
     force_cache: bool = False,
     arch_mode: str = ARCH_AWARE_MODE,
     clock_region: str | None = None,
+    layout: str = "per_device",
 ) -> dict[str, list[Path]]:
+    """Augment ``std/`` and ``rdc/`` directories for a single device.
+
+    See module docstring for output layout. Returns a dict ``{"std": [...], "rdc": [...]}``
+    listing every shard written.
+    """
     input_path = Path(input_root)
     output_path = Path(output_root)
     cache_root = Path(cache_dir) if cache_dir is not None else output_path / "board_arch"
@@ -68,39 +116,121 @@ def augment_dataset_dirs(
     if arch_mode in ("fabric", "both"):
         ensure_board_fabric_cache(device, cache_dir=cache_root, force=force_cache)
     return {
-        "std": _augment_split(input_path, output_path, "std", device, arch_aware_payload),
-        "rdc": _augment_split(input_path, output_path, "rdc", device, arch_aware_payload),
+        "std": _augment_split(input_path, output_path, "std", device, arch_aware_payload, layout=layout),
+        "rdc": _augment_split(input_path, output_path, "rdc", device, arch_aware_payload, layout=layout),
     }
 
 
+def augment_dataset_dirs_multi(
+    input_root: str | Path,
+    output_root: str | Path,
+    *,
+    devices: list[str],
+    cache_dir: str | Path | None = None,
+    force_cache: bool = False,
+    arch_mode: str = ARCH_AWARE_MODE,
+    clock_region: str | None = None,
+    layout: str = "per_device",
+) -> dict[str, dict[str, list[Path]]]:
+    """Run :func:`augment_dataset_dirs` for each device, returning per-device results."""
+    if layout == "legacy" and len(devices) > 1:
+        raise ValueError(
+            "layout='legacy' clobbers shared output paths and cannot be used "
+            "with more than one device; use layout='per_device' for multi-board runs."
+        )
+    results: dict[str, dict[str, list[Path]]] = {}
+    for device in devices:
+        results[device] = augment_dataset_dirs(
+            input_root,
+            output_root,
+            device=device,
+            cache_dir=cache_dir,
+            force_cache=force_cache,
+            arch_mode=arch_mode,
+            clock_region=clock_region,
+            layout=layout,
+        )
+    return results
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Attach one FPGA architecture profile to HGBO-DSE datasets.")
-    parser.add_argument("--input-root", type=Path, default=DEFAULT_DATASET_ROOT, help="dataset root containing std/ and rdc/")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_DATASET_ROOT, help="dataset root where std_arch/ and rdc_arch/ are written")
-    parser.add_argument("--device", default=DEFAULT_BOARD_DEVICE, help="FPGA part used by the raw HGBO-DSE labels")
-    parser.add_argument("--cache-dir", default=None, help="directory for the extracted RapidWright fabric cache")
-    parser.add_argument("--force-cache", action="store_true", help="re-extract the RapidWright fabric cache")
-    parser.add_argument("--arch-mode", choices=[ARCH_AWARE_MODE, "fabric", "both"], default=ARCH_AWARE_MODE)
-    parser.add_argument("--clock-region", default=None, help="optional RapidWright clock region for arch-aware extraction")
+    """Build the CLI argument parser for ``gen_dataset_board.py``."""
+    parser = argparse.ArgumentParser(description="Attach FPGA architecture profiles to HGBO-DSE datasets.")
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        default=DEFAULT_DATASET_ROOT,
+        help="dataset root containing std/ and rdc/ shards (default: <repo>/dataset)",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_DATASET_ROOT,
+        help="dataset root where augmented shards are written (default: <repo>/dataset)",
+    )
+    parser.add_argument(
+        "--device",
+        action="append",
+        default=None,
+        help=(
+            "FPGA part used to derive the architecture profile. Repeat to "
+            "augment for multiple boards in one invocation. Defaults to "
+            "{!r} when omitted.".format(DEFAULT_BOARD_DEVICE)
+        ),
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="directory for the extracted RapidWright fabric/arch cache "
+        "(default: <output_root>/board_arch)",
+    )
+    parser.add_argument(
+        "--force-cache",
+        action="store_true",
+        help="re-extract the RapidWright fabric/arch cache even if present",
+    )
+    parser.add_argument(
+        "--arch-mode",
+        choices=[ARCH_AWARE_MODE, "fabric", "both"],
+        default=ARCH_AWARE_MODE,
+        help="which architecture cache to ensure: arch-aware tile layout, "
+        "fabric graph, or both",
+    )
+    parser.add_argument(
+        "--clock-region",
+        default=None,
+        help="optional RapidWright clock region for arch-aware extraction",
+    )
+    parser.add_argument(
+        "--legacy-layout",
+        action="store_true",
+        help="write augmented shards under <output>/std_arch (single device only); "
+        "default is per-device subdirs that support multi-board training.",
+    )
     return parser
 
 
-def main(argv=None) -> None:
+def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    written = augment_dataset_dirs(
+    devices = args.device or [DEFAULT_BOARD_DEVICE]
+    layout = "legacy" if args.legacy_layout else "per_device"
+
+    results = augment_dataset_dirs_multi(
         args.input_root,
         args.output_root,
-        device=args.device,
+        devices=devices,
         cache_dir=args.cache_dir,
         force_cache=args.force_cache,
         arch_mode=args.arch_mode,
         clock_region=args.clock_region,
+        layout=layout,
     )
-    total = sum(len(paths) for paths in written.values())
-    print("Wrote {} architecture-aware dataset files for {}".format(total, args.device))
-    for split, paths in written.items():
-        for path in paths:
-            print("{}: {}".format(split, path))
+    for device, written in results.items():
+        total = sum(len(paths) for paths in written.values())
+        print("Wrote {} architecture-aware dataset files for {}".format(total, device))
+        for split, paths in written.items():
+            for path in paths:
+                print("{} ({}): {}".format(split, device, path))
 
 
 if __name__ == "__main__":

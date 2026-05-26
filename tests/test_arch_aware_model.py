@@ -108,7 +108,7 @@ def test_parser_exposes_training_stability_flags():
     assert args.arch_mode == "arch-aware"
     assert args.fabric_mode == "cached"
     assert args.conv_type == "gine"
-    assert args.device == "cpu"
+    assert args.device == "auto"
     assert args.num_workers == 0
     assert args.cpu_threads is None
 

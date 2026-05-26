@@ -7,7 +7,13 @@ from typing import Iterable
 
 import torch
 
-from hgp.board_utils import BoardProfile, DEFAULT_BOARD_DEVICE, normalize_device_name, resolve_board_profile
+from hgp.board_utils import (
+    BoardProfile,
+    DEFAULT_BOARD_DEVICE,
+    board_family_one_hot,
+    normalize_device_name,
+    resolve_board_profile,
+)
 
 
 ARCH_AWARE_LAYOUT_COLS = 360
@@ -100,7 +106,7 @@ def build_arch_aware_metadata(
     fsr_count: int = 1,
 ) -> torch.Tensor:
     total_resources = profile.lut_count + profile.ff_count + profile.dsp_count + profile.bram_count
-    family = profile.family.lower()
+    is_series7, is_ultrascale, is_ultrascale_plus = board_family_one_hot(profile.family)
     values = [
         profile.lut_count / 1_000_000.0,
         profile.ff_count / 1_000_000.0,
@@ -119,9 +125,9 @@ def build_arch_aware_metadata(
         _safe_ratio(profile.ff_count, total_resources),
         _safe_ratio(profile.dsp_count, total_resources),
         _safe_ratio(profile.bram_count, total_resources),
-        1.0 if "7" in family else 0.0,
-        1.0 if family == "ultrascale" else 0.0,
-        1.0 if family == "ultrascaleplus" else 0.0,
+        is_series7,
+        is_ultrascale,
+        is_ultrascale_plus,
         1.0,
     ]
     if len(values) != ARCH_AWARE_METADATA_DIM:
@@ -223,6 +229,13 @@ def _tile_x_y(tile: object) -> tuple[int, int]:
 
 
 def _compress_layout(raw_layout: torch.Tensor) -> torch.Tensor:
+    """Collapse the ``[cols, rows, slots]`` raw layout into ``[cols, 1, slots]``.
+
+    For each column we keep only the first non-empty row's tile-id slots. This
+    discards Y information on purpose — the downstream encoder treats the
+    fabric as a 1D column sequence with positional encoding. Callers that need
+    the full 2D layout should read ``arch_aware_arch_layout_raw`` instead.
+    """
     compressed = torch.zeros((ARCH_AWARE_LAYOUT_COLS, 1, ARCH_AWARE_TILE_SLOTS), dtype=torch.float32)
     for col in range(raw_layout.shape[0]):
         column = raw_layout[col]
@@ -235,6 +248,18 @@ def _compress_layout(raw_layout: torch.Tensor) -> torch.Tensor:
 
 
 def extract_arch_aware_architecture(device: str | None = None, *, clock_region: str | None = None) -> dict[str, object]:
+    """Extract the arch-aware architecture payload for ``device``.
+
+    Walks RapidWright's tile grid (optionally limited to a single clock region),
+    classifies each tile via :func:`classify_arch_aware_tile`, and packs the
+    resulting tile-id grid into a fixed ``[ARCH_AWARE_LAYOUT_COLS,
+    ARCH_AWARE_LAYOUT_ROWS, ARCH_AWARE_TILE_SLOTS]`` raw tensor. The compressed
+    1D-per-column layout (with positional encoding) and a 21-dim metadata vector
+    derived via :func:`build_arch_aware_metadata` are returned alongside.
+
+    A warning is printed if the device's tile grid exceeds the fixed layout
+    dimensions — large parts (e.g. xcvu9p) are truncated silently otherwise.
+    """
     device_name = normalize_device_name(device)
     profile = resolve_board_profile(device_name)
     device_class = require_rapidwright_device()
@@ -264,6 +289,17 @@ def extract_arch_aware_architecture(device: str | None = None, *, clock_region: 
     max_y = max(y for _, y in cells)
     raw_cols = max_x - min_x + 1
     raw_rows = max_y - min_y + 1
+
+    if raw_cols > ARCH_AWARE_LAYOUT_COLS or raw_rows > ARCH_AWARE_LAYOUT_ROWS:
+        import warnings
+
+        warnings.warn(
+            "Device {!r} fabric ({}x{}) exceeds fixed arch-aware layout "
+            "({}x{}); tiles outside the bounds are silently dropped.".format(
+                device_name, raw_cols, raw_rows, ARCH_AWARE_LAYOUT_COLS, ARCH_AWARE_LAYOUT_ROWS,
+            ),
+            stacklevel=2,
+        )
 
     raw_layout = torch.zeros(
         (ARCH_AWARE_LAYOUT_COLS, ARCH_AWARE_LAYOUT_ROWS, ARCH_AWARE_TILE_SLOTS),

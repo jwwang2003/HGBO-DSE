@@ -24,8 +24,22 @@ from hgp.arch_aware_arch import (
     load_arch_aware_arch_cache,
 )
 from hgp.board_fabric import board_fabric_to_device, ensure_board_fabric_cache, load_board_fabric_cache
-from hgp.board_utils import ARCH_ATTR_FIELDS, DEFAULT_BOARD_DEVICE
-from hgp.dataset_utils import generate_dataset, mae_loss, mape_loss, split_dataset
+from hgp.board_utils import ARCH_ATTR_FIELDS, DEFAULT_BOARD_DEVICE, normalize_device_name
+from hgp.dataset_utils import (
+    generate_dataset,
+    generate_multi_board_dataset,
+    leave_one_board_out_split,
+    mae_loss,
+    mape_loss,
+    split_dataset,
+)
+from hgp.multi_board import (
+    board_devices_for_batch,
+    dispatch_arch_aware_payload,
+    dispatch_fabric_payload,
+    prepare_arch_caches,
+    prepare_board_fabric_caches,
+)
 from hgp.pyg_compat import SAGPooling
 
 
@@ -315,6 +329,8 @@ class ArchAwareHierNet(torch.nn.Module):
         if jknFlag:
             x = self.jkn(h_list)
         x = h_list[0] + h_list[1] + h_list[2] if len(h_list) >= 3 else sum(h_list)
+        # TODO: when num_layers > 3, layers >= 3 are dropped from readout.
+        # Consider using sum(h_list) unconditionally or JKN.
         board_embedding = self._board_embedding(arch_graph)
         if board_embedding.size(0) != x.size(0):
             board_embedding = board_embedding.expand(x.size(0), -1)
@@ -355,8 +371,34 @@ def _ensure_finite_tensor(value, name, phase, epoch=None, batch_idx=None):
 
 
 def _architecture_input_from_batch(model, data, fallback):
+    """Pick the correct arch payload for ``data``.
+
+    Single-board path (legacy): if the dataset shards already contain
+    arch_aware_arch_layout / arch_aware_arch_metadata tensors (attached during
+    augmentation), forward those. Otherwise return ``fallback`` (a single-device
+    payload preloaded by :func:`_prepare_architecture_cache`).
+
+    Multi-board path: a caller that has populated ``model._arch_caches`` /
+    ``model._fabric_caches`` (via :func:`_attach_multi_board_caches`) takes
+    precedence over both branches above. The dispatch reads per-sample
+    ``board_device`` from the batch and stitches the right payload back in.
+    """
+    arch_mode = getattr(model, "arch_mode", None)
+    arch_caches = getattr(model, "_arch_caches", None)
+    fabric_caches = getattr(model, "_fabric_caches", None)
+    if arch_mode == ARCH_AWARE_MODE and arch_caches:
+        per_sample = board_devices_for_batch(data)
+        if per_sample is None:
+            return fallback
+        return dispatch_arch_aware_payload(arch_caches, per_sample)
+    if arch_mode != ARCH_AWARE_MODE and fabric_caches:
+        per_sample = board_devices_for_batch(data)
+        if per_sample is None:
+            return fallback
+        return dispatch_fabric_payload(fabric_caches, per_sample)
+
     if (
-        getattr(model, "arch_mode", None) == ARCH_AWARE_MODE
+        arch_mode == ARCH_AWARE_MODE
         and getattr(data, "arch_aware_arch_layout", None) is not None
         and getattr(data, "arch_aware_arch_metadata", None) is not None
     ):
@@ -365,6 +407,17 @@ def _architecture_input_from_batch(model, data, fallback):
             "arch_aware_arch_metadata": data["arch_aware_arch_metadata"],
         }
     return fallback
+
+
+def _attach_multi_board_caches(
+    model,
+    *,
+    arch_caches: dict[str, dict[str, object]] | None = None,
+    fabric_caches: dict[str, dict[str, object]] | None = None,
+) -> None:
+    """Stash per-device payload dicts on the model so the forward path can dispatch."""
+    model._arch_caches = arch_caches or {}
+    model._fabric_caches = fabric_caches or {}
 
 
 def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, epoch=0, grad_clip=None):
@@ -453,13 +506,22 @@ def _prepare_board_training_input(model, board_fabric, fabric_mode):
         return model._board_embedding(board_fabric).detach()
 
 
-def _prepare_architecture_cache(args, device):
+def _prepare_architecture_cache(args, device, devices: list[str] | None = None):
+    """Load the legacy single-device arch payload used as ``fallback`` in dispatch.
+
+    Returns ``(cache_path, payload)`` for the first device in ``devices`` (or
+    :data:`DEFAULT_BOARD_DEVICE` when ``devices`` is ``None``). When training
+    on a single board this single payload is enough; when training across
+    multiple boards the dispatch helper supplied by
+    :func:`_attach_multi_board_caches` overrides it per-sample.
+    """
+    chosen_device = (devices or [DEFAULT_BOARD_DEVICE])[0]
     if args.arch_mode == ARCH_AWARE_MODE:
-        cache_path = ensure_arch_aware_arch_cache(DEFAULT_BOARD_DEVICE, cache_dir=args.arch_cache_dir)
+        cache_path = ensure_arch_aware_arch_cache(chosen_device, cache_dir=args.arch_cache_dir)
         arch_payload = arch_aware_arch_to_device(load_arch_aware_arch_cache(cache_path), device)
         return cache_path, arch_payload
 
-    cache_path = ensure_board_fabric_cache(DEFAULT_BOARD_DEVICE, cache_dir=args.arch_cache_dir)
+    cache_path = ensure_board_fabric_cache(chosen_device, cache_dir=args.arch_cache_dir)
     arch_payload = board_fabric_to_device(load_board_fabric_cache(cache_path), device)
     return cache_path, arch_payload
 
@@ -518,16 +580,47 @@ def _write_summary(args, summary):
 def run_training(args):
     active_threads = _set_cpu_threads(args.cpu_threads)
     spec = TARGET_SPECS[args.target]
-    dataset_dir = os.path.abspath(args.dataset_dir or _default_dataset_dir(spec.dataset_subdir))
-    model_dir = os.path.abspath(args.model_dir or "./model")
-    dataset = os.listdir(dataset_dir)
-    dataset_list = generate_dataset(dataset_dir, dataset, print_info=False)
-    train_ds, test_ds = split_dataset(dataset_list, shuffle=True, seed=args.seed)
-    print("train_ds size = {}, test_ds size = {}".format(len(train_ds), len(test_ds)))
+
+    # Resolve devices.
+    all_devices = _resolve_all_devices(args)
+    multi_board = len(all_devices) > 1 or args.split_mode == "board-out"
+
+    # Load data.
+    if multi_board and args.dataset_root:
+        dataset_list = generate_multi_board_dataset(
+            args.dataset_root,
+            all_devices,
+            spec.dataset_subdir,
+            print_info=True,
+        )
+    else:
+        dataset_dir = os.path.abspath(args.dataset_dir or _default_dataset_dir(spec.dataset_subdir))
+        dataset = os.listdir(dataset_dir)
+        dataset_list = generate_dataset(dataset_dir, dataset, print_info=False)
+
+    # Split.
+    if args.split_mode == "board-out" and args.test_board:
+        train_boards = _parse_device_list(args.train_boards) if args.train_boards else None
+        train_ds, val_ds, test_ds = leave_one_board_out_split(
+            dataset_list,
+            train_boards=train_boards,
+            test_board=normalize_device_name(args.test_board),
+            val_fraction=args.val_fraction,
+            seed=args.seed,
+        )
+        print(
+            "Board-out split: train={}, val={}, test={} (held-out {})".format(
+                len(train_ds), len(val_ds), len(test_ds), args.test_board
+            )
+        )
+    else:
+        train_ds, test_ds = split_dataset(dataset_list, shuffle=True, seed=args.seed)
+        val_ds = None
+        print("train_ds size = {}, test_ds size = {}".format(len(train_ds), len(test_ds)))
 
     loader_kwargs = _loader_kwargs(args)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, **_test_loader_options(args), **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, drop_last=False, **loader_kwargs)
 
     data_ini = None
     for step, data in enumerate(train_loader):
@@ -535,18 +628,32 @@ def run_training(args):
             data_ini = data
             break
     if data_ini is None:
-        raise RuntimeError("No training data loaded from {}".format(dataset_dir))
+        raise RuntimeError("No training data loaded")
     if "arch_attr" not in data_ini:
         raise RuntimeError(
-            "Dataset {} does not contain arch_attr. Generate it with "
-            "`python3 hgp/data_process/gen_dataset_board.py` first.".format(dataset_dir)
+            "Dataset does not contain arch_attr. Generate it with "
+            "`python3 hgp/data_process/gen_dataset_board.py` first."
         )
 
     device = _resolve_device(args.device)
     print("Using device {}".format(device))
     print("Torch CPU threads: {}".format(active_threads))
     print("DataLoader workers: {}".format(args.num_workers))
-    cache_path, board_fabric = _prepare_architecture_cache(args, device)
+    cache_path, board_fabric = _prepare_architecture_cache(args, device, all_devices)
+
+    # Multi-board: load all arch caches and stash on model later.
+    arch_caches = None
+    fabric_caches = None
+    if multi_board:
+        if args.arch_mode == ARCH_AWARE_MODE:
+            arch_caches = prepare_arch_caches(
+                all_devices, cache_dir=args.arch_cache_dir, torch_device=device
+            )
+        else:
+            fabric_caches = prepare_board_fabric_caches(
+                all_devices, cache_dir=args.arch_cache_dir, torch_device=device
+            )
+
     arch_node_dim = board_fabric["arch_x"].shape[-1] if args.arch_mode == "fabric" else 24
     arch_edge_dim = board_fabric["arch_edge_attr"].shape[-1] if args.arch_mode == "fabric" else 4
     arch_graph_dim = board_fabric["arch_graph_attr"].shape[-1] if args.arch_mode == "fabric" else 32
@@ -573,16 +680,21 @@ def run_training(args):
     if args.init_checkpoint:
         payload = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(_checkpoint_state(payload))
+    if multi_board:
+        _attach_multi_board_caches(
+            model, arch_caches=arch_caches, fabric_caches=fabric_caches
+        )
     board_training_input = _prepare_board_training_input(model, board_fabric, args.fabric_mode)
     print(model)
+
+    board_label = ", ".join(all_devices) if multi_board else all_devices[0]
     print(
-        "Training target {} with board profile {} ({})".format(
-            args.target,
-            DEFAULT_BOARD_DEVICE,
-            args.arch_mode,
+        "Training target {} with board(s) {} ({})".format(
+            args.target, board_label, args.arch_mode,
         )
     )
 
+    model_dir = os.path.abspath(args.model_dir or "./model")
     os.makedirs(model_dir, exist_ok=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     min_train_metric = float("inf")
@@ -651,7 +763,8 @@ def run_training(args):
                     "best_metric": min_train_metric,
                     "metric_name": spec.metric_name,
                     "min_train_{}".format(spec.metric_name): min_train_metric,
-                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "board_devices": all_devices,
+                    "test_board": args.test_board,
                     "arch_mode": args.arch_mode,
                     "fabric_mode": args.fabric_mode,
                     "arch_attr_fields": ARCH_ATTR_FIELDS,
@@ -671,7 +784,8 @@ def run_training(args):
                     "best_metric": min_test_metric,
                     "metric_name": spec.metric_name,
                     "min_test_{}".format(spec.metric_name): min_test_metric,
-                    "board_device": DEFAULT_BOARD_DEVICE,
+                    "board_devices": all_devices,
+                    "test_board": args.test_board,
                     "arch_mode": args.arch_mode,
                     "fabric_mode": args.fabric_mode,
                     "arch_attr_fields": ARCH_ATTR_FIELDS,
@@ -704,43 +818,91 @@ def run_training(args):
             **_jsonable_settings(args),
             "active_cpu_threads": active_threads,
             "architecture_cache": str(cache_path),
-            "board_device": DEFAULT_BOARD_DEVICE,
+            "board_devices": all_devices,
+            "test_board": args.test_board,
+            "split_mode": args.split_mode,
         },
     }
     _write_summary(args, summary)
     return summary
 
 
+def _parse_device_list(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    return [normalize_device_name(s.strip()) for s in value.split(",") if s.strip()]
+
+
+def _resolve_all_devices(args) -> list[str]:
+    """Build the full list of FPGA devices involved in this run."""
+    devices: list[str] = []
+    if args.train_boards:
+        devices.extend(_parse_device_list(args.train_boards) or [])
+    if args.test_board:
+        canonical = normalize_device_name(args.test_board)
+        if canonical not in devices:
+            devices.append(canonical)
+    if not devices:
+        devices.append(DEFAULT_BOARD_DEVICE)
+    return devices
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(description="Train architecture-aware HGBO-DSE HGP models.")
-    parser.add_argument("--target", choices=sorted(TARGET_SPECS), default="lut")
-    parser.add_argument("--dataset-dir", default=None)
-    parser.add_argument("--model-dir", default="./model")
-    parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="cpu")
-    parser.add_argument("--cpu-threads", type=int, default=None)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--hidden-channels", type=int, default=64)
-    parser.add_argument("--num-layers", type=int, default=3)
-    parser.add_argument("--arch-hidden-dim", type=int, default=16)
-    parser.add_argument("--fabric-hidden-dim", type=int, default=32)
-    parser.add_argument("--arch-aware-hidden-dim", dest="arch_aware_hidden_dim", type=int, default=32)
-    parser.add_argument("--arch-cache-dir", default=None)
-    parser.add_argument("--arch-mode", choices=[ARCH_AWARE_MODE, "fabric"], default=ARCH_AWARE_MODE)
-    parser.add_argument("--fabric-mode", choices=["cached", "trainable"], default="cached")
-    parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine")
-    parser.add_argument("--drop-out", type=float, default=0.0)
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--lr-decay-factor", type=float, default=0.9)
-    parser.add_argument("--lr-decay-interval", type=int, default=10)
-    parser.add_argument("--weight-decay", type=float, default=0.001)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--print-predictions", action="store_true")
-    parser.add_argument("--deterministic-eval", action="store_true")
-    parser.add_argument("--init-checkpoint", default=None)
-    parser.add_argument("--summary-path", default=None)
-    parser.add_argument("--seed", type=int, default=128)
+    parser = argparse.ArgumentParser(
+        description="Train architecture-aware HGBO-DSE HGP models.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--target", choices=sorted(TARGET_SPECS), default="lut", help="PPA metric to predict")
+    parser.add_argument("--dataset-dir", default=None, help="single-board dataset directory (legacy)")
+    parser.add_argument("--dataset-root", default=None, help="multi-board dataset root (<root>/<device>/std_arch/)")
+    parser.add_argument("--model-dir", default="./model", help="directory for model checkpoints")
+    parser.add_argument("--epochs", type=int, default=500, help="number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=32, help="samples per batch")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="torch device")
+    parser.add_argument("--cpu-threads", type=int, default=None, help="limit torch CPU threads")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--hidden-channels", type=int, default=64, help="design GNN hidden size")
+    parser.add_argument("--num-layers", type=int, default=3, help="number of design GNN layers")
+    parser.add_argument("--arch-hidden-dim", type=int, default=16, help="arch_attr MLP hidden size")
+    parser.add_argument("--fabric-hidden-dim", type=int, default=32, help="fabric encoder output dim")
+    parser.add_argument("--arch-aware-hidden-dim", dest="arch_aware_hidden_dim", type=int, default=32, help="arch-aware encoder hidden size")
+    parser.add_argument("--arch-cache-dir", default=None, help="directory for RapidWright-derived arch caches")
+    parser.add_argument("--arch-mode", choices=[ARCH_AWARE_MODE, "fabric"], default=ARCH_AWARE_MODE, help="architecture encoding strategy")
+    parser.add_argument("--fabric-mode", choices=["cached", "trainable"], default="cached", help="whether the fabric encoder receives gradients")
+    parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine", help="GNN convolution type")
+    parser.add_argument("--drop-out", type=float, default=0.0, help="dropout probability")
+    parser.add_argument("--lr", type=float, default=0.001, help="initial learning rate")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.9, help="multiplicative LR decay factor")
+    parser.add_argument("--lr-decay-interval", type=int, default=10, help="epochs between LR decay steps")
+    parser.add_argument("--weight-decay", type=float, default=0.001, help="Adam weight decay")
+    parser.add_argument("--grad-clip", type=float, default=1.0, help="gradient norm clipping (0 to disable)")
+    parser.add_argument("--print-predictions", action="store_true", help="print pred/true every 10 epochs")
+    parser.add_argument("--deterministic-eval", action="store_true", help="disable shuffle/drop_last in eval loader")
+    parser.add_argument("--init-checkpoint", default=None, help="path to a .pt checkpoint to warm-start from")
+    parser.add_argument("--summary-path", default=None, help="write a JSON summary of the run to this path")
+    parser.add_argument("--seed", type=int, default=128, help="random seed for data shuffle + split")
+    parser.add_argument(
+        "--train-boards",
+        default=None,
+        help="comma-separated device names for training (multi-board mode)",
+    )
+    parser.add_argument(
+        "--test-board",
+        default=None,
+        help="held-out device name for leave-one-board-out evaluation",
+    )
+    parser.add_argument(
+        "--split-mode",
+        choices=["random", "board-out"],
+        default="random",
+        help="dataset split strategy: random 80/20 or leave-one-board-out",
+    )
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.1,
+        help="fraction of training data reserved for in-distribution validation (board-out mode)",
+    )
     return parser
 
 
