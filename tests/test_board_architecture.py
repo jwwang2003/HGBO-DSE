@@ -13,10 +13,12 @@ from hgp.board_utils import (  # noqa: E402
     attach_board_profile,
     augment_dataset,
     board_feature_tensor,
+    equivalent_device_names,
     resolve_board_profile,
 )
 from hgp.data_process.gen_dataset_board import augment_dataset_dirs  # noqa: E402
 from hgp.data_process import gen_dataset_board  # noqa: E402
+from hgp.data_process import gen_dataset_std  # noqa: E402
 from hgp.data_process.gen_dataframe import generate_dataframe  # noqa: E402
 from hgp.dataset_utils import generate_dataset  # noqa: E402
 from hgp.arch_aware_arch import ARCH_AWARE_LAYOUT_COLS, ARCH_AWARE_METADATA_DIM, ARCH_AWARE_TILE_SLOTS  # noqa: E402
@@ -50,6 +52,7 @@ def test_default_board_profile_matches_raw_dataset_target():
     "device,expected_family,expected_one_hot_field",
     [
         ("xcku040_ffva1156_2_e", "kintex_ultrascale", "is_ultrascale"),
+        ("xcku040-ffva1156-2-e", "kintex_ultrascale", "is_ultrascale"),
         ("xcvu9p-flga2104-2-i", "virtex_ultrascale_plus", "is_ultrascale_plus"),
         ("xczu9eg-ffvb1156-2-e", "zynq_ultrascale_plus", "is_ultrascale_plus"),
     ],
@@ -74,6 +77,13 @@ def test_thesis_board_profiles_classify_family_correctly(
         assert arch_attr[0, index].item() == pytest.approx(0.0), (
             "Board {} should not flag {}".format(device, field)
         )
+
+
+def test_equivalent_device_names_include_canonical_and_alias():
+    assert equivalent_device_names("xcku040_ffva1156_2_e") == (
+        "xcku040-ffva1156-2-e",
+        "xcku040_ffva1156_2_e",
+    )
 
 
 def test_attach_board_profile_preserves_sample_fields():
@@ -353,10 +363,98 @@ def test_augment_dataset_dirs_multi_writes_per_device_subdirs(tmp_path):
     results = augment_dataset_dirs_multi(input_root, input_root, devices=devices)
     monkeypatch.undo()
 
-    assert sorted(results) == sorted(devices)
-    for device in devices:
+    expected_devices = [DEFAULT_BOARD_DEVICE, "xcku040-ffva1156-2-e"]
+    assert sorted(results) == sorted(expected_devices)
+    for device in expected_devices:
         assert (input_root / device / "std_arch" / "bfs.pt").is_file()
         assert (input_root / device / "rdc_arch" / "bfs.pt").is_file()
+
+
+def test_augment_dataset_dirs_multi_deduplicates_device_aliases(tmp_path):
+    from hgp.data_process.gen_dataset_board import augment_dataset_dirs_multi
+
+    calls = []
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        gen_dataset_board,
+        "augment_dataset_dirs",
+        lambda *args, device, **kwargs: calls.append(device) or {"std": [], "rdc": []},
+    )
+
+    results = augment_dataset_dirs_multi(
+        tmp_path,
+        tmp_path,
+        devices=["xcku040_ffva1156_2_e", "xcku040-ffva1156-2-e"],
+    )
+    monkeypatch.undo()
+
+    assert calls == ["xcku040-ffva1156-2-e"]
+    assert sorted(results) == ["xcku040-ffva1156-2-e"]
+
+
+def test_gen_dataset_board_reads_per_device_input_shards(tmp_path):
+    input_root = tmp_path / "dataset"
+    std_dir = input_root / "xcku040_ffva1156_2_e" / "std"
+    rdc_dir = input_root / "xcku040_ffva1156_2_e" / "rdc"
+    std_dir.mkdir(parents=True)
+    rdc_dir.mkdir(parents=True)
+    sample = Data(
+        x=torch.tensor([[1.0]]),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.empty((0, 2), dtype=torch.float32),
+        hls_attr=torch.tensor([[1.0, 2.0]]),
+        y=torch.tensor([[3.0]]),
+    )
+    torch.save([sample], std_dir / "bfs.pt")
+    torch.save([sample], rdc_dir / "bfs.pt")
+    arch_aware_payload = {
+        "device": "xcku040-ffva1156-2-e",
+        "arch_aware_arch_layout": torch.ones((ARCH_AWARE_LAYOUT_COLS, 1, ARCH_AWARE_TILE_SLOTS), dtype=torch.float32),
+        "arch_aware_arch_metadata": torch.ones((1, ARCH_AWARE_METADATA_DIM), dtype=torch.float32),
+    }
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(gen_dataset_board, "ensure_arch_aware_arch_cache", lambda *args, **kwargs: tmp_path / "arch.pt")
+    monkeypatch.setattr(gen_dataset_board, "load_arch_aware_arch_cache", lambda *args, **kwargs: arch_aware_payload)
+
+    written = gen_dataset_board.augment_dataset_dirs(
+        input_root,
+        input_root,
+        device="xcku040_ffva1156_2_e",
+    )
+    monkeypatch.undo()
+
+    expected_root = input_root / "xcku040-ffva1156-2-e"
+    assert written == {
+        "std": [expected_root / "std_arch" / "bfs.pt"],
+        "rdc": [expected_root / "rdc_arch" / "bfs.pt"],
+    }
+    std_arch = torch.load(expected_root / "std_arch" / "bfs.pt", map_location="cpu", weights_only=False)
+    assert std_arch[0].board_device == "xcku040-ffva1156-2-e"
+
+
+def test_gen_dataset_std_writes_canonical_per_device_dirs(tmp_path):
+    std_by_key = {("bfs", "xcku040_ffva1156_2_e"): {0: str(tmp_path / "std.pt")}}
+    rdc_by_key = {("bfs", "xcku040_ffva1156_2_e"): {0: str(tmp_path / "rdc.pt")}}
+    sample = Data(
+        x=torch.tensor([[1.0]]),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_attr=torch.empty((0, 2), dtype=torch.float32),
+        hls_attr=torch.tensor([[1.0, 2.0]]),
+        y=torch.tensor([[3.0]]),
+    )
+    torch.save(sample, tmp_path / "std.pt")
+    torch.save(sample, tmp_path / "rdc.pt")
+
+    gen_dataset_std._write_shards(
+        std_by_key,
+        rdc_by_key,
+        output_root=tmp_path / "dataset",
+        device_override=None,
+        layout="per_device",
+    )
+
+    assert (tmp_path / "dataset" / "xcku040-ffva1156-2-e" / "std" / "bfs.pt").is_file()
+    assert (tmp_path / "dataset" / "xcku040-ffva1156-2-e" / "rdc" / "bfs.pt").is_file()
 
 
 def test_generate_dataset_loads_pyg_data_with_current_torch_defaults(tmp_path):

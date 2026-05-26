@@ -28,21 +28,21 @@ def test_pyproject_declares_hgbo_runtime_dependencies():
     assert "torch==2.6.0+cpu" not in dependencies
 
 
-def test_pyproject_routes_pytorch_and_pyg_wheels_to_cpu_uv_indexes():
+def test_pyproject_routes_pytorch_and_pyg_wheels_to_cuda_uv_indexes():
     pyproject = read_pyproject()
     sources = pyproject["tool"]["uv"]["sources"]
     indexes = {index["name"]: index for index in pyproject["tool"]["uv"]["index"]}
 
-    assert sources["torch"]["index"] == "pytorch-cpu"
-    assert sources["torchvision"]["index"] == "pytorch-cpu"
-    assert sources["torchaudio"]["index"] == "pytorch-cpu"
-    assert sources["torch-scatter"]["index"] == "pyg-torch-260-cpu"
-    assert sources["torch-sparse"]["index"] == "pyg-torch-260-cpu"
-    assert indexes["pytorch-cpu"]["url"] == "https://download.pytorch.org/whl/cpu"
-    assert indexes["pytorch-cpu"]["explicit"] is True
-    assert indexes["pyg-torch-260-cpu"]["url"] == "https://data.pyg.org/whl/torch-2.6.0+cpu.html"
-    assert indexes["pyg-torch-260-cpu"]["format"] == "flat"
-    assert indexes["pyg-torch-260-cpu"]["explicit"] is True
+    assert sources["torch"]["index"] == "pytorch-cu124"
+    assert sources["torchvision"]["index"] == "pytorch-cu124"
+    assert sources["torchaudio"]["index"] == "pytorch-cu124"
+    assert sources["torch-scatter"]["index"] == "pyg-torch-260-cu124"
+    assert sources["torch-sparse"]["index"] == "pyg-torch-260-cu124"
+    assert indexes["pytorch-cu124"]["url"] == "https://download.pytorch.org/whl/cu124"
+    assert indexes["pytorch-cu124"]["explicit"] is True
+    assert indexes["pyg-torch-260-cu124"]["url"] == "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
+    assert indexes["pyg-torch-260-cu124"]["format"] == "flat"
+    assert indexes["pyg-torch-260-cu124"]["explicit"] is True
 
 
 def test_pyproject_routes_rapidwright_to_local_source():

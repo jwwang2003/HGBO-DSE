@@ -87,10 +87,10 @@ the legacy SAGE/GCN/GAT options.
 
 The previous full fabric graph path remains available with `--arch-mode fabric`.
 
-HGBO-DSE is currently configured with CPU PyTorch/PyG wheels, and the training
-CLIs default to CPU. Use `--cpu-threads` for PyTorch CPU compute threads, and
-keep DataLoader workers at zero to avoid multiprocessing overhead on the small
-HGBO-DSE datasets:
+HGBO-DSE is configured with CUDA PyTorch/PyG wheels, but the training CLIs
+default to CPU so GPU use is explicit. Use `--cpu-threads` for PyTorch CPU
+compute threads, and keep DataLoader workers at zero to avoid multiprocessing
+overhead on the small HGBO-DSE datasets:
 
 ```bash
 uv run python -m hgp.hier_arch_model \
@@ -122,6 +122,10 @@ PYTHONUNBUFFERED=1 uv run python -m hgp.reporting.compare_training_graphs \
 
 The trainer prints `Using device cpu`, `Torch CPU threads: ...`, and
 `DataLoader workers: ...` at startup.
+
+To opt into GPU training on a host with a working NVIDIA driver, pass
+`--device cuda`. If CUDA is unavailable, the trainer fails loudly instead of
+silently falling back.
 
 The latest forced-CPU 30-epoch comparison uses 16 PyTorch CPU threads and
 `num_workers=0`; its summary and SVG training graphs are under

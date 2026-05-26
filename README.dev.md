@@ -29,7 +29,8 @@ Verify the runtime imports:
 uv run python -c "import optuna, torch, torchvision, torchaudio, torch_geometric, torch_scatter, torch_sparse; print('HGBO deps OK')"
 ```
 
-HGBO-DSE is currently configured for CPU PyTorch/PyG wheels by default. Verify
+HGBO-DSE is configured for CUDA PyTorch/PyG wheels, while the training code
+defaults to CPU unless `--device cuda` is passed. Verify
 the active runtime with:
 
 ```

@@ -115,20 +115,20 @@ package = false
 
 [tool.uv.sources]
 rapidwright = { path = "../RapidWright/python", editable = true }
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
-torchaudio = { index = "pytorch-cpu" }
-"torch-scatter" = { index = "pyg-torch-260-cpu" }
-"torch-sparse" = { index = "pyg-torch-260-cpu" }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+"torch-scatter" = { index = "pyg-torch-260-cu124" }
+"torch-sparse" = { index = "pyg-torch-260-cu124" }
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [[tool.uv.index]]
-name = "pyg-torch-260-cpu"
-url = "https://data.pyg.org/whl/torch-2.6.0+cpu.html"
+name = "pyg-torch-260-cu124"
+url = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
 format = "flat"
 explicit = true
 

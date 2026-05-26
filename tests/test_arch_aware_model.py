@@ -108,7 +108,7 @@ def test_parser_exposes_training_stability_flags():
     assert args.arch_mode == "arch-aware"
     assert args.fabric_mode == "cached"
     assert args.conv_type == "gine"
-    assert args.device == "auto"
+    assert args.device == "cpu"
     assert args.num_workers == 0
     assert args.cpu_threads is None
 
@@ -118,6 +118,7 @@ def test_resolve_device_can_force_cpu_even_when_cuda_is_available(monkeypatch):
 
     assert _resolve_device("cpu") == torch.device("cpu")
     assert _resolve_device("auto") == torch.device("cuda")
+    assert _resolve_device("cuda") == torch.device("cuda")
 
 
 def test_set_cpu_threads_configures_torch_thread_count():
