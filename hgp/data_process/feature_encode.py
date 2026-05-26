@@ -108,5 +108,6 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items):
         edge = DG.edges[edge_id]
         pyg_DG.edges[edge_id]['edge_attr'] = [float(edge['edge_type']), float(edge['is_back_edge'])]
 
-    nx.nx_pydot.write_dot(pyg_DG, dot_store_path)
+    if dot_store_path:
+        nx.nx_pydot.write_dot(pyg_DG, dot_store_path)
     return pyg_DG

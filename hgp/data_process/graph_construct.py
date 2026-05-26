@@ -9,7 +9,7 @@ import xml.etree.cElementTree as cET
 
 constFlag = 1  # whether extract const: 1/0
 blockFlag = 1  # whether extract block: 1/0
-plotFlag = 1  # whether draw cdfg graph: 1/0
+plotFlag = 0  # whether draw cdfg graph: 1/0
 
 # core name of double operation
 coreList = ['DAddSub_nodsp', 'DAddSub_fulldsp', 'DMul_nodsp', 'DMul_fulldsp', 'DMul_maxdsp', 'DDiv', 'DCompare']
@@ -65,7 +65,8 @@ class CDFG:
         self.get_node_latency()
         self.get_node_resource(save_path)
         self.construct_graph(save_path)
-        self.visualize_graph(save_path)
+        if plotFlag:
+            self.visualize_graph(save_path)
 
     def parse_adb(self):
         listIRinfo = []

@@ -100,6 +100,7 @@ def process_bench_ver(
     output_root: Path,
     board_device: str | None = None,
     layout: str = "per_device",
+    emit_dot: bool = False,
 ) -> dict[str, int]:
     """Process one bench/ver directory into std and rdc shards.
 
@@ -158,7 +159,7 @@ def process_bench_ver(
         hls_attr_rdc = [hls_attr_std[-1]] if hls_attr_std else [0.0]
 
         # Standard features (6 node features)
-        std_dot_path = str(cdfg_dir / "std_pyg_G.dot")
+        std_dot_path = str(cdfg_dir / "std_pyg_G.dot") if emit_dot else None
         std_df_path = str(cdfg_dir / "std_pyg_G.pt")
         try:
             std_pyg = generate_pyg_dot(DG, std_dot_path, N_NUM_ITEMS_STD)
@@ -174,7 +175,7 @@ def process_bench_ver(
             continue
 
         # Reduced features (2 node features, for CP prediction)
-        rdc_dot_path = str(cdfg_dir / "rdc_pyg_G.dot")
+        rdc_dot_path = str(cdfg_dir / "rdc_pyg_G.dot") if emit_dot else None
         rdc_df_path = str(cdfg_dir / "rdc_pyg_G.pt")
         try:
             rdc_pyg = generate_pyg_dot(DG, rdc_dot_path, N_NUM_ITEMS_RDC)
@@ -249,6 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write shards to flat std/ and rdc/ (no per-device subdirs)",
     )
+    parser.add_argument(
+        "--emit-dot",
+        action="store_true",
+        help="write graphviz .dot files for each sample (slow, for debugging only)",
+    )
     return parser
 
 
@@ -280,6 +286,7 @@ def main(argv: list[str] | None = None) -> None:
             output_root=args.output_root,
             board_device=board_device,
             layout=layout,
+            emit_dot=args.emit_dot,
         )
         total_std += counts["std"]
         total_rdc += counts["rdc"]
