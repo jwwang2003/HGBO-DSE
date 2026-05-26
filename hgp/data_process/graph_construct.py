@@ -324,6 +324,8 @@ class CDFG:
         rtl_dict = dict()
         for IRinfo in self.listIRinfo:
             all_rtl = IRinfo.find('*/res')
+            if all_rtl is None:
+                continue
             component = all_rtl.find('dp_component_resource')
             expression = all_rtl.find('dp_expression_resource')
             fifo = all_rtl.find('dp_fifo_resource')
@@ -331,7 +333,7 @@ class CDFG:
             multiplexer = all_rtl.find('dp_multiplexer_resource')
             register = all_rtl.find('dp_register_resource')
 
-            for item in component.findall('item'):
+            for item in component.findall('item') if component is not None else []:
                 rtl_name = item.find('first').text
                 rtl_name = rtl_name.split(' ')[0]
                 rtl_res = item.find('second')
@@ -349,7 +351,7 @@ class CDFG:
                         elif res.find('first').text == 'BRAM_18K':
                             rtl_dict[rtl_name].bram = res.find('second').text
 
-            for item in expression.findall('item'):
+            for item in expression.findall('item') if expression is not None else []:
                 rtl_name = item.find('first').text
                 operation = rtl_name.split(' ')[2]
                 rtl_name = rtl_name.split(' ')[0]
@@ -369,7 +371,7 @@ class CDFG:
                         elif res.find('first').text == '(1P1)':
                             rtl_dict[rtl_name].bitwidth_p1 = res.find('second').text
 
-            for item in fifo.findall('item'):
+            for item in fifo.findall('item') if fifo is not None else []:
                 rtl_name = item.find('first').text
                 rtl_res = item.find('second')
                 if rtl_name not in rtl_dict:
@@ -390,7 +392,7 @@ class CDFG:
                         elif res.find('first').text == 'Size':
                             rtl_dict[rtl_name].ff_size = res.find('second').text
 
-            for item in memory.findall('item'):
+            for item in memory.findall('item') if memory is not None else []:
                 rtl_name = item.find('first').text
                 rtl_res = item.find('second')
                 if rtl_name not in rtl_dict:
@@ -413,7 +415,7 @@ class CDFG:
                         elif res.find('first').text == '(3W*Bits*Banks)':
                             rtl_dict[rtl_name].mem_wxbitsxbanks = res.find('second').text
 
-            for item in multiplexer.findall('item'):
+            for item in multiplexer.findall('item') if multiplexer is not None else []:
                 # TODO: rename rtl_name
                 rtl_name = item.find('first').text + '_mux'
                 rtl_res = item.find('second')
@@ -429,7 +431,7 @@ class CDFG:
                         elif res.find('first').text == '(2Count)':
                             rtl_dict[rtl_name].mux_totalbits = res.find('second').text
 
-            for item in register.findall('item'):
+            for item in register.findall('item') if register is not None else []:
                 # TODO: rename rtl_name
                 rtl_name = item.find('first').text
                 rtl_res = item.find('second')
