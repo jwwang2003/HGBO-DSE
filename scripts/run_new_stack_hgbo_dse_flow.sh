@@ -12,6 +12,11 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 : "${SEED:=128}"
 : "${DRY_RUN:=0}"
 : "${DETERMINISTIC_EVAL:=1}"
+: "${REFERENCE_DETERMINISTIC_EVAL:=$DETERMINISTIC_EVAL}"
+: "${ORIGINAL_TRAIN_DETERMINISTIC_EVAL:=0}"
+: "${LOADER_RNG_MODE:=isolated}"
+: "${REFERENCE_LOADER_RNG_MODE:=$LOADER_RNG_MODE}"
+: "${ORIGINAL_TRAIN_LOADER_RNG_MODE:=$LOADER_RNG_MODE}"
 
 : "${RUN_REFERENCE_EVAL:=1}"
 : "${RUN_ORIGINAL_TARGETS:=0}"
@@ -19,6 +24,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 : "${RUN_ORIGINAL_DSP:=$RUN_ORIGINAL_TARGETS}"
 : "${RUN_ORIGINAL_BRAM:=$RUN_ORIGINAL_TARGETS}"
 : "${RUN_BRAM_STATS:=0}"
+: "${RUN_BRAM_RESIDUAL_CALIBRATOR:=0}"
 : "${RUN_ARCH_VERIFY:=0}"
 
 : "${ORIGINAL_EPOCHS:=500}"
@@ -30,6 +36,9 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 : "${BRAM_LOSS_WEIGHTING:=none}"
 : "${BRAM_TARGET_TRANSFORM:=none}"
 : "${BRAM_TRAIN_SAMPLER:=none}"
+: "${BRAM_HLS_RESIDUAL_INDEX:=3}"
+: "${BRAM_CALIBRATOR_ESTIMATORS:=500}"
+: "${BRAM_CALIBRATOR_JOBS:=$CPU_THREADS}"
 : "${BRAM_POSITIVE_WEIGHT:=2}"
 : "${BRAM_MID_WEIGHT:=4}"
 : "${BRAM_HIGH_WEIGHT:=16}"
@@ -122,6 +131,32 @@ metrics = {
 with open(summary_csv, "a", newline="", encoding="utf-8") as handle:
     writer = csv.writer(handle)
     writer.writerow(["bram_stats", name, "completed", json.dumps(metrics, sort_keys=True), out_dir, log])
+print(f"{name}: {json.dumps(metrics, sort_keys=True)}")
+PY
+}
+
+append_bram_calibrator_summary() {
+  local name="$1"
+  local out_dir="$2"
+  local log="$3"
+
+  "$PYTHON_BIN" - "$SUMMARY_CSV" "$name" "$out_dir" "$log" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+summary_csv, name, out_dir, log = sys.argv[1:]
+summary = json.loads((Path(out_dir) / "summary.json").read_text(encoding="utf-8"))
+metrics = {
+    "metric": "mae",
+    "test_mae": summary["test"]["mae"],
+    "train_mae": summary["train"]["mae"],
+    "residual_accuracy": summary["test"]["residual_accuracy"],
+}
+with open(summary_csv, "a", newline="", encoding="utf-8") as handle:
+    writer = csv.writer(handle)
+    writer.writerow(["bram_residual_calibrator", name, "completed", json.dumps(metrics, sort_keys=True), out_dir, log])
 print(f"{name}: {json.dumps(metrics, sort_keys=True)}")
 PY
 }
@@ -220,7 +255,16 @@ run_original_training() {
     --num-workers "$NUM_WORKERS"
     --output-dir "$out_dir"
   )
-  if [[ "$DETERMINISTIC_EVAL" == "1" ]]; then
+  local deterministic_eval="$ORIGINAL_TRAIN_DETERMINISTIC_EVAL"
+  if [[ "$stage" == "reference_eval" ]]; then
+    deterministic_eval="$REFERENCE_DETERMINISTIC_EVAL"
+  fi
+  local loader_rng_mode="$ORIGINAL_TRAIN_LOADER_RNG_MODE"
+  if [[ "$stage" == "reference_eval" ]]; then
+    loader_rng_mode="$REFERENCE_LOADER_RNG_MODE"
+  fi
+  cmd+=(--loader-rng-mode "$loader_rng_mode")
+  if [[ "$deterministic_eval" == "1" ]]; then
     cmd+=(--deterministic-eval)
   fi
   if [[ -n "$init_flag" ]]; then
@@ -256,6 +300,23 @@ run_bram_stats() {
   )
   if run_logged "bram_stats" "$name" "$out_dir" "${cmd[@]}"; then
     append_bram_stats_summary "$name" "$out_dir" "$log" "$json_path"
+  fi
+}
+
+run_bram_residual_calibrator() {
+  local name="bram_residual_calibrator_${BRAM_CALIBRATOR_ESTIMATORS}trees"
+  local out_dir="$FLOW_ROOT/$name"
+  local log="$out_dir/run.log"
+  local -a cmd=(
+    env PYTHONUNBUFFERED=1 "$PYTHON_BIN" -m hgp.reporting.bram_residual_calibrator
+    --seed "$SEED"
+    --hls-index "$BRAM_HLS_RESIDUAL_INDEX"
+    --n-estimators "$BRAM_CALIBRATOR_ESTIMATORS"
+    --n-jobs "$BRAM_CALIBRATOR_JOBS"
+    --output-dir "$out_dir"
+  )
+  if run_logged "bram_residual_calibrator" "$name" "$out_dir" "${cmd[@]}"; then
+    append_bram_calibrator_summary "$name" "$out_dir" "$log"
   fi
 }
 
@@ -348,6 +409,7 @@ if [[ "$RUN_ORIGINAL_BRAM" == "1" ]]; then
     "" \
     --target-transform "$BRAM_TARGET_TRANSFORM" \
     --train-sampler "$BRAM_TRAIN_SAMPLER" \
+    --hls-residual-index "$BRAM_HLS_RESIDUAL_INDEX" \
     --loss-weighting "$BRAM_LOSS_WEIGHTING" \
     --bram-positive-weight "$BRAM_POSITIVE_WEIGHT" \
     --bram-mid-weight "$BRAM_MID_WEIGHT" \
@@ -357,6 +419,10 @@ fi
 
 if [[ "$RUN_BRAM_STATS" == "1" ]]; then
   run_bram_stats
+fi
+
+if [[ "$RUN_BRAM_RESIDUAL_CALIBRATOR" == "1" ]]; then
+  run_bram_residual_calibrator
 fi
 
 if [[ "$RUN_ARCH_VERIFY" == "1" ]]; then

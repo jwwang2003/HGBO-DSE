@@ -1,5 +1,45 @@
 # HGBO-DSE And Architecture-Aware Extension Report
 
+## 2026-05-22 V2 Architecture-Embedding Update
+
+The May 16 results below are retained as implementation history. The current
+six-target v2 architecture-embedding experiment is:
+
+```bash
+FLOW_ROOT=img/training/v2_arch_embedding_experiment_20260522 \
+CPU_THREADS=16 \
+MAPE_EPOCHS=500 \
+DSP_EPOCHS=500 \
+BRAM_EPOCHS=500 \
+BRAM_CALIBRATOR_ESTIMATORS=500 \
+scripts/run_v2_arch_embedding_experiment.sh
+```
+
+Output root:
+
+```text
+img/training/v2_arch_embedding_experiment_20260522
+```
+
+Deterministic checkpoint results from that run:
+
+| Target | Metric | Deterministic test | Paper level | Current interpretation |
+|---|---:|---:|---:|---|
+| LUT | MAPE | `0.105753` | `0.0772` | worse than the stable non-arch v2 path |
+| FF | MAPE | `0.052988` | `0.0421` | close, slightly worse than stable non-arch v2 |
+| CP | MAPE | `0.053493` | `0.0539` | paper-level; best current CP path |
+| Power | MAPE | `0.080039` | `0.0739` | close, roughly tied with stable non-arch v2 |
+| DSP | MAE | `0.625710` | `0.57` | worse than stable non-arch v2 |
+| BRAM raw HGP | MAE | `0.404357` | `0.09` | much better than the old raw BRAM failure, still not enough |
+| BRAM residual calibrator | MAE | `0.022958` | `0.09` | production BRAM path; better than paper |
+
+Conclusion: architecture embeddings are useful for CP and improve raw BRAM
+substantially, but they are not a global replacement for the stable v2 HGP
+settings on this single-device dataset. The production recommendation is a
+hybrid: stable non-arch HGP for LUT/FF/Power/DSP, architecture-aware HGP for
+CP, and the residual calibrator for BRAM. See `V2_PRODUCTION_REPRODUCTION.md`
+for the maintained runbook and acceptance gates.
+
 ## Status
 
 This report describes the original HGBO-DSE workflow, the architecture-aware extension implemented in this branch, and the training results available in this workspace as of May 16, 2026.

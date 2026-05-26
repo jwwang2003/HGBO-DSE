@@ -41,6 +41,10 @@ CHECKPOINT_PREFIX = {
     "cp": "cp_mean",
     "power": "power_mean",
 }
+LOADER_RNG_OFFSETS = {
+    "train": 0,
+    "eval": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,14 @@ def test_loader_options(args) -> dict:
     return {"shuffle": True, "drop_last": True}
 
 
+def loader_generator(args, stream: str) -> torch.Generator | None:
+    if args.loader_rng_mode == "legacy-shared":
+        return None
+    if stream not in LOADER_RNG_OFFSETS:
+        raise ValueError(f"Unknown loader RNG stream: {stream}")
+    return torch.Generator().manual_seed(args.seed + LOADER_RNG_OFFSETS[stream])
+
+
 def transform_targets(true_y: torch.Tensor, args) -> torch.Tensor:
     if args.target_transform == "none":
         return true_y
@@ -138,7 +150,32 @@ def transform_targets(true_y: torch.Tensor, args) -> torch.Tensor:
     raise ValueError(f"Unknown target transform: {args.target_transform}")
 
 
-def metric_predictions(out: torch.Tensor, args) -> torch.Tensor:
+def apply_hls_residual(out: torch.Tensor, hls_attr: torch.Tensor | None, args) -> torch.Tensor:
+    if args.hls_residual_index is None:
+        return out
+    if args.target_transform != "none":
+        raise ValueError("HLS residual prediction is only supported with --target-transform none")
+    if hls_attr is None:
+        raise ValueError("--hls-residual-index requires hls_attr")
+    if args.hls_residual_index < 0 or args.hls_residual_index >= hls_attr.size(-1):
+        raise ValueError(
+            f"--hls-residual-index {args.hls_residual_index} is out of range for hls_attr width {hls_attr.size(-1)}"
+        )
+    residual_base = hls_attr[:, args.hls_residual_index].to(device=out.device, dtype=out.dtype)
+    return out + residual_base.view_as(out)
+
+
+def initialize_hls_residual_head(model, args) -> None:
+    if args.hls_residual_index is None:
+        return
+    final_layer = model.mlps[-1]
+    torch.nn.init.zeros_(final_layer.weight)
+    if final_layer.bias is not None:
+        torch.nn.init.zeros_(final_layer.bias)
+
+
+def metric_predictions(out: torch.Tensor, args, hls_attr: torch.Tensor | None = None) -> torch.Tensor:
+    out = apply_hls_residual(out, hls_attr, args)
     if args.target_transform == "none":
         return out
     if args.target_transform == "log1p":
@@ -146,9 +183,15 @@ def metric_predictions(out: torch.Tensor, args) -> torch.Tensor:
     raise ValueError(f"Unknown target transform: {args.target_transform}")
 
 
-def metric_value(out: torch.Tensor, true_y: torch.Tensor, metric_name: str, args) -> torch.Tensor:
+def metric_value(
+    out: torch.Tensor,
+    true_y: torch.Tensor,
+    metric_name: str,
+    args,
+    hls_attr: torch.Tensor | None = None,
+) -> torch.Tensor:
     metric_fn = _metric_fn(metric_name)
-    return metric_fn(metric_predictions(out, args), true_y).float()
+    return metric_fn(metric_predictions(out, args, hls_attr=hls_attr), true_y).float()
 
 
 def loss_weights(true_y: torch.Tensor, args) -> torch.Tensor:
@@ -166,7 +209,8 @@ def loss_weights(true_y: torch.Tensor, args) -> torch.Tensor:
     return weights
 
 
-def training_loss(out: torch.Tensor, true_y: torch.Tensor, args) -> torch.Tensor:
+def training_loss(out: torch.Tensor, true_y: torch.Tensor, args, hls_attr: torch.Tensor | None = None) -> torch.Tensor:
+    out = apply_hls_residual(out, hls_attr, args)
     transformed_true_y = transform_targets(true_y, args)
     per_sample_loss = F.huber_loss(out, transformed_true_y, reduction="none").float()
     weights = loss_weights(true_y, args).to(device=per_sample_loss.device, dtype=per_sample_loss.dtype)
@@ -202,10 +246,28 @@ def train_sample_weights(dataset, spec, args) -> torch.Tensor | None:
 
 def make_train_loader(train_ds, spec, args, loader_kwargs):
     sample_weights = train_sample_weights(train_ds, spec, args)
+    generator = loader_generator(args, "train")
     if sample_weights is None:
-        return DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
-    sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+        return DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=True,
+            generator=generator,
+            **loader_kwargs,
+        )
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True, generator=generator)
     return DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, drop_last=True, **loader_kwargs)
+
+
+def make_test_loader(test_ds, args, loader_kwargs):
+    return DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        generator=loader_generator(args, "eval"),
+        **test_loader_options(args),
+        **loader_kwargs,
+    )
 
 
 def checkpoint_name(target: str, split: str) -> str:
@@ -285,8 +347,8 @@ def train_stable_original_epoch(
             reduce_optimizer_lr(optimizer, recovery_lr_decay)
             continue
 
-        loss = training_loss(out, true_y, args)
-        metric = metric_value(out, true_y, spec.metric_name, args)
+        loss = training_loss(out, true_y, args, hls_attr=data["hls_attr"])
+        metric = metric_value(out, true_y, spec.metric_name, args, hls_attr=data["hls_attr"])
         step = safe_optimizer_step(
             loss=loss,
             model=model,
@@ -326,8 +388,8 @@ def evaluate_stable_original(model, loader, device, spec, epoch, args):
             data = data.to(device)
             out = model(data.x, data.edge_index, data.batch, data["hls_attr"], edge_attr=getattr(data, "edge_attr", None)).view(-1)
             true_y = _target_values(data, spec)
-            loss = training_loss(out, true_y, args)
-            metric = metric_value(out, true_y, metric_name, args)
+            loss = training_loss(out, true_y, args, hls_attr=data["hls_attr"])
+            metric = metric_value(out, true_y, metric_name, args, hls_attr=data["hls_attr"])
             total_loss += loss.item() * data.num_graphs
             total_metric += metric.item() * data.num_graphs
     return total_loss / len(loader.dataset), total_metric / len(loader.dataset)
@@ -341,7 +403,7 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
     train_ds, test_ds = _get_split(split_cache, spec.dataset_subdir, args.seed)
     loader_kwargs = _loader_kwargs(args)
     train_loader = make_train_loader(train_ds, spec, args, loader_kwargs)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, **test_loader_options(args), **loader_kwargs)
+    test_loader = make_test_loader(test_ds, args, loader_kwargs)
     data_ini = _first_batch(train_loader)
     model = OriginalHierNet(
         in_channels=data_ini.num_features,
@@ -353,6 +415,7 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
         pool_mode=spec.pool_mode,
         drop_out=args.drop_out,
     ).to(device)
+    initialize_hls_residual_head(model, args)
     init_checkpoint = initial_checkpoint_path(target, args)
     init_metadata = None
     if init_checkpoint is not None:
@@ -378,6 +441,8 @@ def run_stable_original_target(target: str, args, device, output_dir: Path, spli
         "target_transform": args.target_transform,
         "train_sampler": args.train_sampler,
         "loss_weighting": args.loss_weighting,
+        "loader_rng_mode": args.loader_rng_mode,
+        "hls_residual_index": args.hls_residual_index,
         "bram_positive_weight": args.bram_positive_weight,
         "bram_mid_weight": args.bram_mid_weight,
         "bram_high_weight": args.bram_high_weight,
@@ -570,6 +635,8 @@ def run(args):
             "target_transform": args.target_transform,
             "train_sampler": args.train_sampler,
             "loss_weighting": args.loss_weighting,
+            "loader_rng_mode": args.loader_rng_mode,
+            "hls_residual_index": args.hls_residual_index,
             "bram_positive_weight": args.bram_positive_weight,
             "bram_mid_weight": args.bram_mid_weight,
             "bram_high_weight": args.bram_high_weight,
@@ -612,6 +679,13 @@ def build_parser():
     parser.add_argument("--target-transform", choices=["none", "log1p"], default="none")
     parser.add_argument("--train-sampler", choices=["none", "bram-bucket-balanced", "bram-nonzero-balanced"], default="none")
     parser.add_argument("--loss-weighting", choices=["none", "bram-tail"], default="none")
+    parser.add_argument("--loader-rng-mode", choices=["isolated", "legacy-shared"], default="isolated")
+    parser.add_argument(
+        "--hls-residual-index",
+        type=int,
+        default=None,
+        help="Train/evaluate predictions as model_output + hls_attr[index], useful for BRAM residual correction.",
+    )
     parser.add_argument("--bram-positive-weight", type=float, default=2.0)
     parser.add_argument("--bram-mid-weight", type=float, default=4.0)
     parser.add_argument("--bram-high-weight", type=float, default=16.0)

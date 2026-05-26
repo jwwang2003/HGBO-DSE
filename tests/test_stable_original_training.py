@@ -46,6 +46,63 @@ def test_deterministic_eval_uses_full_unshuffled_test_loader():
     assert stable.test_loader_options(args) == {"shuffle": False, "drop_last": False}
 
 
+def test_loader_rng_defaults_to_isolated_generators():
+    args = stable.build_parser().parse_args(["--seed", "128"])
+
+    train_generator = stable.loader_generator(args, "train")
+    eval_generator = stable.loader_generator(args, "eval")
+
+    assert train_generator is not None
+    assert eval_generator is not None
+    assert train_generator.initial_seed() == 128
+    assert eval_generator.initial_seed() == 129
+
+
+def test_legacy_shared_loader_rng_uses_global_rng():
+    args = stable.build_parser().parse_args(["--loader-rng-mode", "legacy-shared"])
+
+    assert stable.loader_generator(args, "train") is None
+    assert stable.loader_generator(args, "eval") is None
+
+
+def _sample_id_dataset(size=12):
+    return [
+        Data(
+            x=torch.tensor([[float(index)]]),
+            edge_index=torch.empty((2, 0), dtype=torch.long),
+            hls_attr=torch.zeros((1, 6)),
+            y=torch.zeros((1, 8)),
+            sample_id=torch.tensor([index]),
+        )
+        for index in range(size)
+    ]
+
+
+def _loader_sample_order(loader):
+    order = []
+    for batch in loader:
+        order.extend(int(value) for value in batch.sample_id.view(-1).tolist())
+    return order
+
+
+def test_eval_loader_iteration_does_not_change_next_train_shuffle_order():
+    args = stable.build_parser().parse_args(["--batch-size", "3", "--seed", "128"])
+    dataset = _sample_id_dataset()
+
+    stable._set_seed(args.seed)
+    train_loader = stable.make_train_loader(dataset, stable.ORIGINAL_TARGET_SPECS["dsp"], args, {})
+    _loader_sample_order(train_loader)
+    expected_second_epoch_order = _loader_sample_order(train_loader)
+
+    stable._set_seed(args.seed)
+    train_loader = stable.make_train_loader(dataset, stable.ORIGINAL_TARGET_SPECS["dsp"], args, {})
+    eval_loader = stable.make_test_loader(dataset, args, {})
+    _loader_sample_order(train_loader)
+    _loader_sample_order(eval_loader)
+
+    assert _loader_sample_order(train_loader) == expected_second_epoch_order
+
+
 def test_loss_weights_default_to_ones():
     args = stable.build_parser().parse_args([])
     true_y = torch.tensor([0.0, 0.5, 5.0, 50.0, 200.0])
@@ -126,6 +183,67 @@ def test_metric_values_use_inverse_transformed_predictions():
     metric = stable.metric_value(pred, true_y, "mae", args)
 
     assert metric == pytest.approx(torch.tensor(5.0))
+
+
+def test_hls_residual_predictions_add_selected_hls_attribute():
+    args = stable.build_parser().parse_args(["--hls-residual-index", "3"])
+    pred = torch.tensor([0.0, 1.5])
+    hls_attr = torch.tensor(
+        [
+            [100.0, 10.0, 2.0, 5.0, 0.0, 7.5],
+            [200.0, 20.0, 3.0, 9.0, 0.0, 8.5],
+        ]
+    )
+
+    adjusted = stable.apply_hls_residual(pred, hls_attr, args)
+
+    assert torch.equal(adjusted, torch.tensor([5.0, 10.5]))
+
+
+def test_training_loss_uses_hls_residual_before_huber_loss():
+    args = stable.build_parser().parse_args(["--hls-residual-index", "3"])
+    pred = torch.tensor([0.0, 1.5])
+    true_y = torch.tensor([6.0, 8.0])
+    hls_attr = torch.tensor(
+        [
+            [100.0, 10.0, 2.0, 5.0, 0.0, 7.5],
+            [200.0, 20.0, 3.0, 9.0, 0.0, 8.5],
+        ]
+    )
+
+    loss = stable.training_loss(pred, true_y, args, hls_attr=hls_attr)
+
+    expected = torch.nn.functional.huber_loss(torch.tensor([5.0, 10.5]), true_y, reduction="none").mean()
+    assert loss == pytest.approx(expected)
+
+
+def test_metric_values_use_hls_residual_predictions():
+    args = stable.build_parser().parse_args(["--hls-residual-index", "3"])
+    pred = torch.tensor([0.0, 1.5])
+    true_y = torch.tensor([6.0, 8.0])
+    hls_attr = torch.tensor(
+        [
+            [100.0, 10.0, 2.0, 5.0, 0.0, 7.5],
+            [200.0, 20.0, 3.0, 9.0, 0.0, 8.5],
+        ]
+    )
+
+    metric = stable.metric_value(pred, true_y, "mae", args, hls_attr=hls_attr)
+
+    assert metric == pytest.approx(torch.tensor(1.75))
+
+
+def test_hls_residual_mode_zero_initializes_final_output_layer():
+    args = stable.build_parser().parse_args(["--hls-residual-index", "3"])
+    model = torch.nn.Module()
+    model.mlps = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 1)])
+    for parameter in model.mlps[-1].parameters():
+        parameter.data.fill_(0.25)
+
+    stable.initialize_hls_residual_head(model, args)
+
+    assert torch.equal(model.mlps[-1].weight, torch.zeros_like(model.mlps[-1].weight))
+    assert torch.equal(model.mlps[-1].bias, torch.zeros_like(model.mlps[-1].bias))
 
 
 def _bram_sample(value):

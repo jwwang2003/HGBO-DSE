@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -489,6 +490,31 @@ def _loader_kwargs(args):
     }
 
 
+def _test_loader_options(args):
+    if args.deterministic_eval:
+        return {"shuffle": False, "drop_last": False}
+    return {"shuffle": True, "drop_last": True}
+
+
+def _checkpoint_state(payload):
+    if isinstance(payload, dict) and "model" in payload:
+        return payload["model"]
+    return payload
+
+
+def _jsonable_settings(args):
+    settings = vars(args).copy()
+    return {key: str(value) if isinstance(value, Path) else value for key, value in settings.items()}
+
+
+def _write_summary(args, summary):
+    if not args.summary_path:
+        return
+    summary_path = Path(args.summary_path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def run_training(args):
     active_threads = _set_cpu_threads(args.cpu_threads)
     spec = TARGET_SPECS[args.target]
@@ -501,7 +527,7 @@ def run_training(args):
 
     loader_kwargs = _loader_kwargs(args)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, **_test_loader_options(args), **loader_kwargs)
 
     data_ini = None
     for step, data in enumerate(train_loader):
@@ -544,6 +570,9 @@ def run_training(args):
         pool_mode=spec.pool_mode,
     )
     model = model.to(device)
+    if args.init_checkpoint:
+        payload = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(_checkpoint_state(payload))
     board_training_input = _prepare_board_training_input(model, board_fabric, args.fabric_mode)
     print(model)
     print(
@@ -558,6 +587,24 @@ def run_training(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     min_train_metric = float("inf")
     min_test_metric = float("inf")
+    history = []
+    checkpoint_paths = {}
+    if args.epochs == 0:
+        train_loss, train_metric = evaluate(model, train_loader, device, spec, board_training_input, epoch=-1)
+        test_loss, test_metric = evaluate(model, test_loader, device, spec, board_training_input, epoch=-1)
+        min_train_metric = train_metric
+        min_test_metric = test_metric
+        history.append(
+            {
+                "epoch": -1,
+                "learning_rate": args.lr,
+                "train_loss": train_loss,
+                "test_loss": test_loss,
+                "train_metric": train_metric,
+                "test_metric": test_metric,
+                "best_test_metric": min_test_metric,
+            }
+        )
     for epoch in range(args.epochs):
         train_loss, train_metric = train_epoch(
             model,
@@ -589,17 +636,20 @@ def run_training(args):
             )
         )
 
-        if epoch % 10 == 0:
+        if args.lr_decay_factor != 1.0 and args.lr_decay_interval > 0 and epoch % args.lr_decay_interval == 0:
             for p in optimizer.param_groups:
-                p["lr"] *= 0.9
+                p["lr"] *= args.lr_decay_factor
 
         if train_metric < min_train_metric:
             min_train_metric = train_metric
+            checkpoint_paths["train"] = os.path.join(model_dir, _checkpoint_name(spec, "train"))
             torch.save(
                 {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch,
+                    "best_metric": min_train_metric,
+                    "metric_name": spec.metric_name,
                     "min_train_{}".format(spec.metric_name): min_train_metric,
                     "board_device": DEFAULT_BOARD_DEVICE,
                     "arch_mode": args.arch_mode,
@@ -612,11 +662,14 @@ def run_training(args):
 
         if test_metric < min_test_metric:
             min_test_metric = test_metric
+            checkpoint_paths["test"] = os.path.join(model_dir, _checkpoint_name(spec, "test"))
             torch.save(
                 {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch,
+                    "best_metric": min_test_metric,
+                    "metric_name": spec.metric_name,
                     "min_test_{}".format(spec.metric_name): min_test_metric,
                     "board_device": DEFAULT_BOARD_DEVICE,
                     "arch_mode": args.arch_mode,
@@ -626,15 +679,36 @@ def run_training(args):
                 },
                 os.path.join(model_dir, _checkpoint_name(spec, "test")),
             )
+        history.append(
+            {
+                "epoch": epoch,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "train_loss": train_loss,
+                "test_loss": test_loss,
+                "train_metric": train_metric,
+                "test_metric": test_metric,
+                "best_test_metric": min_test_metric,
+            }
+        )
 
     print("Min Train {}: {}".format(spec.metric_name.upper(), min_train_metric))
     print("Min Test {}: {}".format(spec.metric_name.upper(), min_test_metric))
-    return {
+    summary = {
         "target": args.target,
         "min_train_metric": min_train_metric,
         "min_test_metric": min_test_metric,
         "metric_name": spec.metric_name,
+        "checkpoints": checkpoint_paths,
+        "history": history,
+        "settings": {
+            **_jsonable_settings(args),
+            "active_cpu_threads": active_threads,
+            "architecture_cache": str(cache_path),
+            "board_device": DEFAULT_BOARD_DEVICE,
+        },
     }
+    _write_summary(args, summary)
+    return summary
 
 
 def build_parser():
@@ -658,9 +732,14 @@ def build_parser():
     parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine")
     parser.add_argument("--drop-out", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr-decay-factor", type=float, default=0.9)
+    parser.add_argument("--lr-decay-interval", type=int, default=10)
     parser.add_argument("--weight-decay", type=float, default=0.001)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--print-predictions", action="store_true")
+    parser.add_argument("--deterministic-eval", action="store_true")
+    parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--summary-path", default=None)
     parser.add_argument("--seed", type=int, default=128)
     return parser
 

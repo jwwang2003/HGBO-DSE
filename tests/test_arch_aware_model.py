@@ -98,8 +98,13 @@ def test_parser_exposes_training_stability_flags():
     args = build_parser().parse_args([])
 
     assert args.lr == pytest.approx(0.001)
+    assert args.lr_decay_factor == pytest.approx(0.9)
+    assert args.lr_decay_interval == 10
     assert args.grad_clip == pytest.approx(1.0)
     assert args.print_predictions is False
+    assert args.deterministic_eval is False
+    assert args.init_checkpoint is None
+    assert args.summary_path is None
     assert args.arch_mode == "arch-aware"
     assert args.fabric_mode == "cached"
     assert args.conv_type == "gine"

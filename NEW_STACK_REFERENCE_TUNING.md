@@ -10,6 +10,71 @@ All runs use:
 - stable trainer: `python -m hgp.reporting.original_stable_training`
 - isolated output directories under `img/training`
 
+## Production Refresh: 2026-05-21 Overnight
+
+The older sections below are retained as tuning history. The current
+production-candidate v2 result is documented in `V2_PRODUCTION_REPRODUCTION.md`.
+
+Full refresh command:
+
+```bash
+FLOW_ROOT=img/training/v2_production_reproduction_20260521_overnight \
+CPU_THREADS=16 \
+MAPE_EPOCHS=500 \
+DSP_EPOCHS=500 \
+BRAM_CALIBRATOR_ESTIMATORS=500 \
+scripts/run_v2_production_reproduction.sh
+```
+
+Refreshed deterministic checkpoint metrics:
+
+| Target | Metric | Deterministic test | Status |
+| --- | ---: | ---: | --- |
+| LUT | MAPE | `0.097056` | inside production gate, still behind paper |
+| FF | MAPE | `0.051250` | inside production gate |
+| CP | MAPE | `0.055517` | inside production gate, near paper |
+| Power | MAPE | `0.079956` | inside production gate |
+| DSP | MAE | `0.521959` | inside production gate, better than paper |
+| BRAM residual calibrator | MAE | `0.022958` | inside production gate, better than paper |
+
+This supersedes the earlier conclusion that BRAM is the remaining production
+blocker. Pure HGP BRAM regression is still a negative diagnostic result, but
+the v2 production path now uses the residual calibrator and reaches paper-level
+accuracy from scratch.
+
+## Architecture-Embedding Follow-Up: 2026-05-22
+
+The architecture-embedding follow-up is documented in
+`V2_PRODUCTION_REPRODUCTION.md` and `ARCH_AWARE_HGBO_DSE_REPORT.md`.
+
+Run command:
+
+```bash
+FLOW_ROOT=img/training/v2_arch_embedding_experiment_20260522 \
+CPU_THREADS=16 \
+MAPE_EPOCHS=500 \
+DSP_EPOCHS=500 \
+BRAM_EPOCHS=500 \
+BRAM_CALIBRATOR_ESTIMATORS=500 \
+scripts/run_v2_arch_embedding_experiment.sh
+```
+
+Deterministic checkpoint metrics:
+
+| Target | Metric | Architecture deterministic test | Interpretation |
+| --- | ---: | ---: | --- |
+| LUT | MAPE | `0.105753` | worse than stable non-arch v2 |
+| FF | MAPE | `0.052988` | close, slightly worse than stable non-arch v2 |
+| CP | MAPE | `0.053493` | paper-level and better than stable non-arch v2 |
+| Power | MAPE | `0.080039` | close, roughly tied with stable non-arch v2 |
+| DSP | MAE | `0.625710` | worse than stable non-arch v2 |
+| BRAM raw HGP | MAE | `0.404357` | much better than the old raw failure, still not paper-level |
+| BRAM residual calibrator | MAE | `0.022958` | production BRAM path, better than paper |
+
+Conclusion: architecture embeddings should be used selectively in the current
+v2 production recipe. They are the best observed path for CP, but not for LUT
+or DSP. BRAM remains production-quality only through the residual calibrator.
+
 ## Reference-Weight Targets
 
 Measured with:
@@ -137,6 +202,19 @@ env PYTHONUNBUFFERED=1 HGBO_LEGACY_SAGPOOL=1 .venv/bin/python -m hgp.reporting.o
 ```
 
 Result: DSP best test MAE `0.551700`, best train MAE `0.466435`.
+
+Reproduction note: do not pass `--deterministic-eval` during from-scratch DSP
+training when trying to match this run. The flag changes the test `DataLoader`
+from shuffled/drop-last to ordered/full. Because the training and evaluation
+loaders share the process RNG stream, that changes the next epoch's shuffled
+training order after epoch 0. The corrected full-flow reproduction trains DSP
+with paper-style eval mechanics, then runs a separate deterministic checkpoint
+evaluation. In the 2026-05-21 scratch run this recovered the same paper-style
+best MAE `0.551700` and deterministic checkpoint MAE `0.549132`.
+
+New training runs now default to `--loader-rng-mode isolated` so eval iteration
+does not perturb future train shuffles. Use `--loader-rng-mode legacy-shared`
+only when trying to replay the historical coupled-RNG curve exactly.
 
 This is the closest new-stack from-scratch result so far:
 
@@ -293,6 +371,68 @@ RUN_REFERENCE=0 RUN_DSP_PILOTS=0 RUN_DSP_FULL=0 RUN_MAPE_TARGETS=0 RUN_BRAM_DEFA
 The new stack with the required legacy SAGPooling shim can train usable models for most targets, but this tuning pass did not reach reference-weight quality across the board. Power is near reference, DSP improved from `0.862715` to `0.551700`, and CP/LUT/FF are usable but still worse than reference. BRAM is the blocker: the best new-stack BRAM run here is `0.972186`, much worse than both the built-in reference `0.077023` and the earlier same-hyperparameter run `0.457353`.
 
 For thesis-quality reporting, use the current runs as negative/diagnostic evidence rather than claiming full paper-level reproduction. The next technical step should be either deterministic full-test evaluation plus retuned checkpoint selection, or target-specific BRAM treatment such as label normalization/log-space training. If the immediate requirement is to reproduce the original paper-level checkpoints, `.venv113` remains the cleanest training path.
+
+## BRAM Root-Cause Update: 2026-05-20
+
+The released BRAM checkpoint is not failing because of Torch checkpoint
+compatibility. It evaluates under the new stack at deterministic test MAE
+`0.078283` when loaded with the SAGPooling compatibility path.
+
+The worse fresh BRAM runs are training failures. The deterministic test split
+shows that `hls_attr[3]` is the HLS BRAM estimate and is already a strong
+baseline:
+
+| Predictor | Deterministic BRAM MAE |
+| --- | ---: |
+| Zero BRAM | `7.510817` |
+| Raw `hls_attr[3]` | `0.268433` |
+| Current legacy-SAGPool HGP checkpoint | `1.040144` |
+| HLS residual HGP early checkpoint | `0.305510` |
+| Built-in HGP checkpoint | `0.078283` |
+| ExtraTrees classifier on `true_bram - hls_attr[3]` | `0.022958` |
+
+The residual distribution is highly discrete and imbalanced:
+
+```text
+residual = true_bram - hls_attr[3]
+0: 2028 test samples
+-3: 81
+-1: 75
+4: 54
+-2: 17
+-4: 10
+```
+
+This explains the observed BRAM tail behavior. Regression HGP training mostly
+learns the dominant zero-residual/near-zero-BRAM cases and misses rare residual
+classes, while the released checkpoint somehow learned or memorized the offset
+classes. A BRAM-specific residual classifier over the existing graph/global
+features corrects the issue on the paper split, but it is a target-specific
+postprocessor rather than a pure HGP+SAGE+GF reproduction.
+
+Implementation updates:
+
+- `hgp.reporting.original_stable_training` now supports
+  `--hls-residual-index 3` so BRAM experiments can train/evaluate
+  `model_output + hls_attr[3]`.
+- `hgp.reporting.checkpoint_prediction_stats` reads this setting from
+  checkpoint metadata.
+- The new-stack flow scripts pass the BRAM residual option for BRAM-only
+  training stages.
+- `hgp.reporting.bram_residual_calibrator` trains a from-scratch
+  `ExtraTreesClassifier` on the discrete residual
+  `true_bram - hls_attr[3]`. With seed `128` and 500 trees, the verified
+  from-scratch flow run reached deterministic BRAM test MAE `0.022958` and
+  residual-class accuracy `0.988962`.
+
+Reproduce the BRAM from-scratch calibrator:
+
+```bash
+env RUN_REFERENCE_EVAL=0 RUN_ORIGINAL_TARGETS=0 \
+  RUN_BRAM_RESIDUAL_CALIBRATOR=1 RUN_ARCH_VERIFY=0 \
+  FLOW_ROOT=img/training/flow_bram_residual_calibrator_from_scratch_20260521 \
+  CPU_THREADS=16 scripts/run_new_stack_hgbo_dse_flow.sh
+```
 
 ## Commit-Prep Update: 2026-05-20
 

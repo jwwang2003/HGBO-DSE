@@ -36,7 +36,12 @@ With `--deterministic-eval`:
 - test loader `shuffle=False`
 - test loader `drop_last=False`
 
-This is only an evaluation-control switch. It does not change the architecture, SAGPooling shim, optimizer, or train loader behavior.
+This is an evaluation-control switch for the loader options. It does not change
+the architecture, SAGPooling shim, optimizer, or train loader construction, but
+under the earlier shared-RNG loader mechanics it did perturb later train
+shuffle order by changing how much RNG the eval loader consumed. The v2
+production path now uses isolated loader RNG streams so eval iteration cannot
+affect future train shuffles.
 
 ## Step 2: Deterministic Saved-Checkpoint Evaluations
 
@@ -445,3 +450,36 @@ The remaining gap likely needs a model/objective change that separates the
 zero/nonzero decision from positive-BRAM magnitude. The sampler results show
 that more nonzero exposure helps only when applied gently after a good baseline,
 but aggregate MAE is still too sensitive to harming the zero-heavy majority.
+
+## Step 9: Production Resolution With Residual Calibrator
+
+Status: production path validated.
+
+The pure neural BRAM regression issue above remains useful diagnostic evidence:
+fresh HGP BRAM training under v2 still struggles with the zero-heavy distribution
+and rare high-BRAM tail. For production accuracy, the maintained v2 stack now
+uses `hgp.reporting.bram_residual_calibrator`, which predicts the residual from
+the HLS BRAM estimate instead of asking the HGP regressor to learn the full
+tail from scratch.
+
+Latest full refresh:
+
+```bash
+FLOW_ROOT=img/training/v2_production_reproduction_20260521_overnight \
+CPU_THREADS=16 \
+MAPE_EPOCHS=500 \
+DSP_EPOCHS=500 \
+BRAM_CALIBRATOR_ESTIMATORS=500 \
+scripts/run_v2_production_reproduction.sh
+```
+
+Result:
+
+| Model path | Test MAE | Residual accuracy |
+| --- | ---: | ---: |
+| Built-in HGP BRAM checkpoint | `0.078283` | n/a |
+| v2 BRAM residual calibrator, 500 trees | `0.022958` | `0.988962` |
+
+The BRAM blocker is therefore resolved for the v2 production stack, with the
+caveat that the paper-style pure HGP BRAM reproduction remains an unresolved
+research diagnostic rather than the production model path.

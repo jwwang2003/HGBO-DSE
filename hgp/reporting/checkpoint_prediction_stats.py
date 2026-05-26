@@ -53,7 +53,7 @@ def prediction_rows(model, loader, device, spec, args):
                 data["hls_attr"],
                 edge_attr=getattr(data, "edge_attr", None),
             ).view(-1)
-            pred = metric_predictions(raw_pred, args)
+            pred = metric_predictions(raw_pred, args, hls_attr=data["hls_attr"])
             true = _target_values(data, spec)
             for item_idx, (true_value, pred_value) in enumerate(zip(true.detach().cpu(), pred.detach().cpu())):
                 rows.append(
@@ -122,6 +122,7 @@ def run(args):
     init_metadata = load_initial_checkpoint(model, checkpoint_path, device)
     checkpoint_settings = init_metadata.get("settings") or {}
     args.target_transform = checkpoint_settings.get("target_transform", "none")
+    args.hls_residual_index = checkpoint_settings.get("hls_residual_index")
 
     rows = prediction_rows(model, test_loader, device, spec, args)
     true = torch.tensor([row["true"] for row in rows], dtype=torch.float64)
@@ -138,6 +139,7 @@ def run(args):
             "batch_size": args.batch_size,
             "checkpoint": init_metadata,
             "target_transform": args.target_transform,
+            "hls_residual_index": args.hls_residual_index,
         },
         "true": summarize_values(true),
         "pred": summarize_values(pred),

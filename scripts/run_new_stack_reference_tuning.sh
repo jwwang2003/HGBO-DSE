@@ -13,6 +13,8 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 : "${MAPE_TARGET_EPOCHS:=500}"
 : "${BRAM_EPOCHS:=500}"
 : "${ALL_TARGET_EPOCHS:=500}"
+: "${BRAM_HLS_RESIDUAL_INDEX:=3}"
+: "${LOADER_RNG_MODE:=isolated}"
 : "${RUN_REFERENCE:=1}"
 : "${RUN_DSP_PILOTS:=1}"
 : "${RUN_DSP_FULL:=0}"
@@ -84,6 +86,7 @@ run_training() {
   local lr_decay_interval="$8"
   local weight_decay="$9"
   local init_flag="${10}"
+  shift 10
   local out_dir="$RUN_ROOT/$name"
   local log="$out_dir/run.log"
 
@@ -108,8 +111,10 @@ run_training() {
       --lr-decay-interval "$lr_decay_interval" \
       --weight-decay "$weight_decay" \
       --cpu-threads "$CPU_THREADS" \
+      --loader-rng-mode "$LOADER_RNG_MODE" \
       --output-dir "$out_dir" \
-      $init_flag
+      $init_flag \
+      "$@"
   ) > "$log" 2>&1
 
   append_summary "$name" "$out_dir" "$init_flag"
@@ -136,7 +141,8 @@ if [[ "$RUN_MAPE_TARGETS" == "1" ]]; then
 fi
 
 if [[ "$RUN_BRAM_DEFAULT" == "1" ]]; then
-  run_training "bram_lr001_wd1e3_decay09_clip1_${BRAM_EPOCHS}ep" "bram" "$BRAM_EPOCHS" 0.005 0.001 1.0 0.9 10 0.001 ""
+  run_training "bram_hls_residual_idx${BRAM_HLS_RESIDUAL_INDEX}_lr001_wd1e3_decay09_clip1_${BRAM_EPOCHS}ep" "bram" "$BRAM_EPOCHS" 0.005 0.001 1.0 0.9 10 0.001 "" \
+    --hls-residual-index "$BRAM_HLS_RESIDUAL_INDEX"
 fi
 
 if [[ "$RUN_ALL_TARGETS" == "1" ]]; then
