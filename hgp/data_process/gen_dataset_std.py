@@ -159,6 +159,18 @@ def _process_one_sample(task: tuple) -> tuple:
         if top_name is None:
             return (bench, ver, idx, None, None, "skip:no_top")
 
+        # Load SA/AR switching activity cache for this kernel (optional).
+        sa_by_opcode: dict | None = None
+        sa_cache_dir = _HGBO_ROOT / "dataset" / "switching_activity"
+        sa_cache_file = sa_cache_dir / f"{top_name}_switching_activity.json"
+        if sa_cache_file.exists():
+            try:
+                import json as _json
+                _sa_data = _json.loads(sa_cache_file.read_text())
+                sa_by_opcode = _sa_data.get("by_opcode", {})
+            except Exception:
+                sa_by_opcode = None
+
         cdfg_dir = bench_path / prj_name / "cdfg"
         cdfg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,7 +200,7 @@ def _process_one_sample(task: tuple) -> tuple:
         std_dot_path = str(cdfg_dir / "std_pyg_G.dot") if emit_dot else None
         std_df_path = str(cdfg_dir / "std_pyg_G.pt")
         try:
-            std_pyg = generate_pyg_dot(DG, std_dot_path, N_NUM_ITEMS_STD)
+            std_pyg = generate_pyg_dot(DG, std_dot_path, N_NUM_ITEMS_STD, sa_by_opcode=sa_by_opcode)
             std_pyg = nx.convert_node_labels_to_integers(std_pyg)
             generate_dataframe(
                 std_pyg, metric_list, hls_attr_std, bench, prj_name, std_df_path,
@@ -203,7 +215,7 @@ def _process_one_sample(task: tuple) -> tuple:
         rdc_dot_path = str(cdfg_dir / "rdc_pyg_G.dot") if emit_dot else None
         rdc_df_path = str(cdfg_dir / "rdc_pyg_G.pt")
         try:
-            rdc_pyg = generate_pyg_dot(DG, rdc_dot_path, N_NUM_ITEMS_RDC)
+            rdc_pyg = generate_pyg_dot(DG, rdc_dot_path, N_NUM_ITEMS_RDC, sa_by_opcode=sa_by_opcode)
             rdc_pyg = nx.convert_node_labels_to_integers(rdc_pyg)
             generate_dataframe(
                 rdc_pyg, metric_list, hls_attr_rdc, bench, prj_name, rdc_df_path,

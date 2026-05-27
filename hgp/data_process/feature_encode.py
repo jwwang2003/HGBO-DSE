@@ -53,7 +53,7 @@ def opcode_type_numerical(opcode):
     return _OPTYPE_TO_NUM.get(_OPCODE_TO_TYPE.get(opcode, 'none'), 0.0)
 
 
-def generate_pyg_dot(DG, dot_store_path, n_num_items):
+def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
     pyg_DG = DG.__class__()
     pyg_DG.add_nodes_from(DG)
     pyg_DG.add_edges_from(DG.edges)
@@ -129,7 +129,20 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items):
 
     for edge_id in DG.edges():
         edge = DG.edges[edge_id]
-        pyg_DG.edges[edge_id]['edge_attr'] = [float(edge['edge_type']), float(edge['is_back_edge'])]
+        src_node_id = edge_id[0]
+        sa_val = 0.0
+        ar_val = 0.0
+        if sa_by_opcode is not None:
+            src_opcode = DG.nodes[src_node_id].get("opcode", "")
+            metrics = sa_by_opcode.get(src_opcode, {})
+            sa_val = float(metrics.get("sa", 0.0))
+            ar_val = float(metrics.get("ar", 0.0))
+        pyg_DG.edges[edge_id]['edge_attr'] = [
+            float(edge['edge_type']),
+            float(edge['is_back_edge']),
+            sa_val,
+            ar_val,
+        ]
 
     if dot_store_path:
         nx.nx_pydot.write_dot(pyg_DG, dot_store_path)
