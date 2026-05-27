@@ -40,6 +40,7 @@ CHECKPOINT_PREFIX = {
     "bram": "bram_mae",
     "cp": "cp_mean",
     "power": "power_mean",
+    "dynamic_power": "dynamic_power_mean",
 }
 LOADER_RNG_OFFSETS = {
     "train": 0,

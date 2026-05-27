@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import os
+import re
 from logging import Logger
 import numpy as np
 from dataclasses import dataclass
@@ -36,6 +39,44 @@ class StagePPA:
     SRL:    int     = 0                 # SRL: Shift-register LUT
     CP:     float   = float('inf')      # CP: Clock period
     PWR:    float   = 0.0               # PWR: Power consumption?
+
+
+_POWER_SUMMARY_RE = re.compile(
+    r"^\|\s*(?P<name>Total On-Chip Power|Dynamic|Device Static)\s*"
+    r"\((?P<unit>m?W)\)\s*\|\s*(?P<value>[0-9]+(?:\.[0-9]+)?)",
+)
+
+
+def _power_value_watts(power_rpt: str, field: str = "Total On-Chip Power") -> float | None:
+    """Parse a Vivado power summary value and return it in watts.
+
+    Vivado can emit either ``(W)`` or ``(mW)`` reports depending on the command
+    path. The original parser only matched the ``(W)`` spelling, which silently
+    left PWR at the default value when handed a milliwatt report.
+    """
+    with open(power_rpt, "r") as f_power:
+        for line in f_power:
+            match = _POWER_SUMMARY_RE.match(line)
+            if not match or match.group("name") != field:
+                continue
+            value = float(match.group("value"))
+            unit = match.group("unit")
+            return value / 1000.0 if unit == "mW" else value
+    return None
+
+
+def _power_summary_watts(power_rpt: str) -> dict[str, float]:
+    """Return available Vivado power summary rows in watts."""
+    values: dict[str, float] = {}
+    with open(power_rpt, "r") as f_power:
+        for line in f_power:
+            match = _POWER_SUMMARY_RE.match(line)
+            if not match:
+                continue
+            value = float(match.group("value"))
+            unit = match.group("unit")
+            values[match.group("name")] = value / 1000.0 if unit == "mW" else value
+    return values
 
 def getHLS(params, rpt_list, log: Logger):
     fail_flag = False
@@ -187,6 +228,8 @@ def getPPA(params, rpt_list, log: Logger):
     LUT = FF = DSP = BRAM = URAM = SRL = F1
     CP = F2
     PWR = F3
+    PWR_DYNAMIC = F3
+    PWR_STATIC = F3
     if os.path.exists(impl_rpt):
         log.info("[INFO] Reading post-implementation report...")
         f_impl = open(impl_rpt, 'r')
@@ -208,16 +251,25 @@ def getPPA(params, rpt_list, log: Logger):
                 res = [i for i in line.split()]
                 CP = float(res[-1])
     if os.path.exists(power_rpt):
-        f_power = open(power_rpt, 'r')
-        for line in f_power.readlines():
-            if line.startswith("| Total On-Chip Power (W)  |"):
-                res = [i for i in line.split()]
-                PWR = float(res[-2])
-                break
+        power_summary = _power_summary_watts(power_rpt)
+        PWR = power_summary.get("Total On-Chip Power", PWR)
+        PWR_DYNAMIC = power_summary.get("Dynamic", PWR_DYNAMIC)
+        PWR_STATIC = power_summary.get("Device Static", PWR_STATIC)
     else:
         log.info("Implementation Flow Failed !")
         fail_flag = True
-    dictPPA['IMPL'] = {'LUT': LUT, 'FF': FF, 'DSP': DSP, 'BRAM': BRAM, 'URAM': URAM, 'SRL': SRL, 'CP': CP, 'PWR': PWR}
+    dictPPA['IMPL'] = {
+        'LUT': LUT,
+        'FF': FF,
+        'DSP': DSP,
+        'BRAM': BRAM,
+        'URAM': URAM,
+        'SRL': SRL,
+        'CP': CP,
+        'PWR': PWR,
+        'PWR_DYNAMIC': PWR_DYNAMIC,
+        'PWR_STATIC': PWR_STATIC,
+    }
     log.info("Post-Implementation Results:")
     log.info("LUT = %d, FF = %d, DSP = %d, BRAM = %d, URAM = %d, SRL = %d, CP = %f, PWR = %f" % \
         (LUT, FF, DSP, BRAM, URAM, SRL, CP, PWR))

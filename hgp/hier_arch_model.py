@@ -49,7 +49,7 @@ from hgp.multi_board import (
 from hgp.pyg_compat import SAGPooling
 
 
-TARGETS = ["lut", "ff", "dsp", "bram", "uram", "srl", "cp", "power"]
+TARGETS = ["lut", "ff", "dsp", "bram", "uram", "srl", "cp", "power", "dynamic_power"]
 ARCH_AWARE_MODE = "arch-aware"
 jknFlag = 0
 
@@ -74,6 +74,17 @@ TARGET_SPECS = {
     "bram": TargetSpec("bram", 3, "std_arch", 6, "add", "mae", mae_loss, checkpoint_stem="bram_mae"),
     "cp": TargetSpec("cp", 6, "rdc_arch", 1, "mean", "mape", mape_loss, checkpoint_stem="cp_mean"),
     "power": TargetSpec("power", 7, "std_arch", 6, "mean", "mape", mape_loss, label_scale=100.0, checkpoint_stem="power_mean"),
+    "dynamic_power": TargetSpec(
+        "dynamic_power",
+        8,
+        "std_arch",
+        6,
+        "mean",
+        "mape",
+        mape_loss,
+        label_scale=100.0,
+        checkpoint_stem="dynamic_power_mean",
+    ),
 }
 
 

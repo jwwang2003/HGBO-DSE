@@ -5,14 +5,20 @@ __pycache__
 
 # Generated HGBO-DSE datasets and architecture caches. Keep README files tracked.
 dataset/raw/*.zip
+dataset/raw/*/
 dataset/std/*.pt
 dataset/rdc/*.pt
+dataset/*/std/
+dataset/*/rdc/
+dataset/*/std_arch/
+dataset/*/rdc_arch/
 dataset/std_arch/
 dataset/rdc_arch/
 dataset/board_arch/
 
 # Generated model/checkpoint and experiment outputs.
 model/
+model_smoke/
 img/training/
 img/reproduced_builtin*/
 

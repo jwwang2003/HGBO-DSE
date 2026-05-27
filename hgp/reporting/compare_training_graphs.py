@@ -58,11 +58,20 @@ ORIGINAL_TARGET_SPECS = {
     "bram": OriginalTargetSpec("bram", 3, "std", 6, "add", "mae"),
     "cp": OriginalTargetSpec("cp", 6, "rdc", 1, "mean", "mape"),
     "power": OriginalTargetSpec("power", 7, "std", 6, "mean", "mape", label_scale=100.0),
+    "dynamic_power": OriginalTargetSpec(
+        "dynamic_power",
+        8,
+        "std",
+        6,
+        "mean",
+        "mape",
+        label_scale=100.0,
+    ),
 }
 
 
 ORIGINAL_CONV_TYPE = "sage"
-TARGETS = ["lut", "ff", "dsp", "bram", "cp", "power"]
+TARGETS = ["lut", "ff", "dsp", "bram", "cp", "power", "dynamic_power"]
 COLOR_ORIGINAL_TRAIN = "#6b7280"
 COLOR_ORIGINAL_TEST = "#111827"
 COLOR_ARCH_TRAIN = "#2a9d8f"

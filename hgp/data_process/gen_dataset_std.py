@@ -51,6 +51,8 @@ from hgp.board_utils import normalize_device_name
 # Node feature sets matching the original HGBO-DSE convention.
 N_NUM_ITEMS_STD = ["m_delay", "latency", "bitwidth", "lut", "ff", "dsp"]
 N_NUM_ITEMS_RDC = ["m_delay", "latency"]
+IMPL_METRIC_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "SRL", "CP", "PWR", "PWR_DYNAMIC"]
+HLS_ATTR_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "CP"]
 
 DEFAULT_RAW_ROOT = _HGBO_ROOT / "dataset" / "raw"
 DEFAULT_OUTPUT_ROOT = _HGBO_ROOT / "dataset"
@@ -179,8 +181,8 @@ def _process_one_sample(task: tuple) -> tuple:
 
         dict_metric = ppa_info.get("IMPL", {})
         dict_hls = ppa_info.get("HLS", {})
-        metric_list = list(dict_metric.values())
-        hls_attr_std = list(dict_hls.values())
+        metric_list = [float(dict_metric.get(key, 0.0)) for key in IMPL_METRIC_KEYS]
+        hls_attr_std = [float(dict_hls.get(key, 0.0)) for key in HLS_ATTR_KEYS]
         hls_attr_rdc = [hls_attr_std[-1]] if hls_attr_std else [0.0]
 
         std_dot_path = str(cdfg_dir / "std_pyg_G.dot") if emit_dot else None
