@@ -14,6 +14,7 @@ from hgp.hier_arch_model import (  # noqa: E402
     TARGET_SPECS,
     _default_dataset_dir,
     _resolve_device,
+    _select_checkpoint_metric_source,
     _set_cpu_threads,
     _prepare_board_training_input,
     build_parser,
@@ -111,6 +112,21 @@ def test_parser_exposes_training_stability_flags():
     assert args.device == "cpu"
     assert args.num_workers == 0
     assert args.cpu_threads is None
+    assert args.checkpoint_metric_source == "auto"
+
+
+def test_checkpoint_metric_source_auto_uses_validation_when_available():
+    args = build_parser().parse_args([])
+
+    assert _select_checkpoint_metric_source(args, has_validation=True) == "val"
+    assert _select_checkpoint_metric_source(args, has_validation=False) == "test"
+
+
+def test_checkpoint_metric_source_rejects_validation_without_validation_split():
+    args = build_parser().parse_args(["--checkpoint-metric-source", "val"])
+
+    with pytest.raises(ValueError, match="requires a non-empty validation split"):
+        _select_checkpoint_metric_source(args, has_validation=False)
 
 
 def test_resolve_device_can_force_cpu_even_when_cuda_is_available(monkeypatch):

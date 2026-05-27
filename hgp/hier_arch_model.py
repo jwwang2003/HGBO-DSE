@@ -375,6 +375,17 @@ def _runtime_target_scale(args):
     return float(getattr(args, "_target_scale", 1.0) or 1.0)
 
 
+def _default_runtime_args():
+    return argparse.Namespace(
+        _target_scale=1.0,
+        target_transform="none",
+        hls_residual_index=None,
+        normalize_features=False,
+        warmup_batches=0,
+        lr=0.001,
+    )
+
+
 def _transform_target(true_y, args):
     scale = _runtime_target_scale(args)
     if scale != 1.0:
@@ -511,7 +522,9 @@ def _apply_warmup(optimizer, args, epoch, batch_idx, batches_per_epoch):
         group["lr"] = args.lr * scale
 
 
-def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, args, epoch=0, grad_clip=None):
+def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, args=None, epoch=0, grad_clip=None):
+    if args is None:
+        args = _default_runtime_args()
     model.train()
     total_loss = 0
     total_metric = 0
@@ -555,7 +568,9 @@ def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, a
     return total_loss / len(ds), total_metric / len(ds)
 
 
-def evaluate(model, loader, device, spec, board_embedding, args, epoch=0, print_predictions=False):
+def evaluate(model, loader, device, spec, board_embedding, args=None, epoch=0, print_predictions=False):
+    if args is None:
+        args = _default_runtime_args()
     model.eval()
     with torch.no_grad():
         loss = 0
@@ -598,6 +613,51 @@ def evaluate(model, loader, device, spec, board_embedding, args, epoch=0, print_
 def _checkpoint_name(spec, split):
     stem = spec.checkpoint_stem or spec.name
     return "{}_arch_h64_d0_checkpoint_{}.pt".format(stem, split)
+
+
+def _select_checkpoint_metric_source(args, has_validation: bool) -> str:
+    source = args.checkpoint_metric_source
+    if source == "auto":
+        return "val" if has_validation else "test"
+    if source == "val" and not has_validation:
+        raise ValueError("--checkpoint-metric-source=val requires a non-empty validation split")
+    return source
+
+
+def _checkpoint_payload(
+    *,
+    model,
+    optimizer,
+    epoch,
+    metric_value,
+    metric_key,
+    spec,
+    all_devices,
+    args,
+    cache_path,
+    feature_stats,
+    target_scale,
+    extra_metrics=None,
+):
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "best_metric": metric_value,
+        "metric_name": spec.metric_name,
+        "{}_{}".format(metric_key, spec.metric_name): metric_value,
+        "board_devices": all_devices,
+        "test_board": args.test_board,
+        "arch_mode": args.arch_mode,
+        "fabric_mode": args.fabric_mode,
+        "arch_attr_fields": ARCH_ATTR_FIELDS,
+        "architecture_cache": str(cache_path),
+        "feature_stats": stats_to_jsonable(feature_stats),
+        "target_scale": target_scale,
+    }
+    if extra_metrics:
+        payload.update(extra_metrics)
+    return payload
 
 
 def _prepare_board_training_input(model, board_fabric, fabric_mode):
@@ -759,7 +819,12 @@ def run_training(args):
 
     loader_kwargs = _loader_kwargs(args)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    val_loader = None
+    if val_ds is not None and len(val_ds) > 0:
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=False, **loader_kwargs)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, drop_last=False, **loader_kwargs)
+    checkpoint_metric_source = _select_checkpoint_metric_source(args, val_loader is not None)
+    checkpoint_split = "val" if checkpoint_metric_source == "val" else "test"
 
     data_ini = None
     for step, data in enumerate(train_loader):
@@ -839,23 +904,35 @@ def run_training(args):
     os.makedirs(model_dir, exist_ok=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     min_train_metric = float("inf")
+    min_val_metric = float("inf")
     min_test_metric = float("inf")
+    min_selection_metric = float("inf")
     history = []
     checkpoint_paths = {}
     if args.epochs == 0:
         train_loss, train_metric = evaluate(model, train_loader, device, spec, board_training_input, args, epoch=-1)
+        if val_loader is not None:
+            val_loss, val_metric = evaluate(model, val_loader, device, spec, board_training_input, args, epoch=-1)
+            min_val_metric = val_metric
+        else:
+            val_loss, val_metric = None, None
         test_loss, test_metric = evaluate(model, test_loader, device, spec, board_training_input, args, epoch=-1)
         min_train_metric = train_metric
         min_test_metric = test_metric
+        min_selection_metric = val_metric if checkpoint_metric_source == "val" else test_metric
         history.append(
             {
                 "epoch": -1,
                 "learning_rate": args.lr,
                 "train_loss": train_loss,
+                "val_loss": val_loss,
                 "test_loss": test_loss,
                 "train_metric": train_metric,
+                "val_metric": val_metric,
                 "test_metric": test_metric,
+                "best_val_metric": min_val_metric if val_loader is not None else None,
                 "best_test_metric": min_test_metric,
+                "best_selection_metric": min_selection_metric,
             }
         )
     for epoch in range(args.epochs):
@@ -880,14 +957,43 @@ def run_training(args):
             epoch,
             print_predictions=args.print_predictions,
         )
-        print(f"Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
-        print(
-            "Epoch: {:03d}, Train {}: {:.4f}, Test {}: {:.4f}".format(
+        if val_loader is not None:
+            val_loss, val_metric = evaluate(
+                model,
+                val_loader,
+                device,
+                spec,
+                board_training_input,
+                args,
                 epoch,
+            )
+        else:
+            val_loss, val_metric = None, None
+
+        if val_metric is not None and val_metric < min_val_metric:
+            min_val_metric = val_metric
+        selection_metric = val_metric if checkpoint_metric_source == "val" else test_metric
+        print_parts = [
+            f"Epoch: {epoch:03d}",
+            f"Train Loss: {train_loss:.4f}",
+        ]
+        if val_loss is not None:
+            print_parts.append(f"Val Loss: {val_loss:.4f}")
+        print_parts.append(f"Test Loss: {test_loss:.4f}")
+        print(", ".join(print_parts))
+        metric_parts = [
+            "Epoch: {:03d}".format(epoch),
+            "Train {}: {:.4f}".format(spec.metric_name.upper(), train_metric),
+        ]
+        if val_metric is not None:
+            metric_parts.append("Val {}: {:.4f}".format(spec.metric_name.upper(), val_metric))
+        metric_parts.append("Test {}: {:.4f}".format(spec.metric_name.upper(), test_metric))
+        print(", ".join(metric_parts))
+        print(
+            "Checkpoint selection {} {}: {:.4f}".format(
+                checkpoint_metric_source.upper(),
                 spec.metric_name.upper(),
-                train_metric,
-                spec.metric_name.upper(),
-                test_metric,
+                selection_metric,
             )
         )
 
@@ -899,65 +1005,90 @@ def run_training(args):
             min_train_metric = train_metric
             checkpoint_paths["train"] = os.path.join(model_dir, _checkpoint_name(spec, "train"))
             torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                    "best_metric": min_train_metric,
-                    "metric_name": spec.metric_name,
-                    "min_train_{}".format(spec.metric_name): min_train_metric,
-                    "board_devices": all_devices,
-                    "test_board": args.test_board,
-                    "arch_mode": args.arch_mode,
-                    "fabric_mode": args.fabric_mode,
-                    "arch_attr_fields": ARCH_ATTR_FIELDS,
-                    "architecture_cache": str(cache_path),
-                    "feature_stats": stats_to_jsonable(feature_stats),
-                    "target_scale": target_scale,
-                },
+                _checkpoint_payload(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    metric_value=min_train_metric,
+                    metric_key="min_train",
+                    spec=spec,
+                    all_devices=all_devices,
+                    args=args,
+                    cache_path=cache_path,
+                    feature_stats=feature_stats,
+                    target_scale=target_scale,
+                    extra_metrics={
+                        "val_{}".format(spec.metric_name): val_metric,
+                        "test_{}".format(spec.metric_name): test_metric,
+                        "checkpoint_metric_source": checkpoint_metric_source,
+                    },
+                ),
                 os.path.join(model_dir, _checkpoint_name(spec, "train")),
             )
 
         if test_metric < min_test_metric:
             min_test_metric = test_metric
-            checkpoint_paths["test"] = os.path.join(model_dir, _checkpoint_name(spec, "test"))
+        if selection_metric < min_selection_metric:
+            min_selection_metric = selection_metric
+            checkpoint_paths[checkpoint_split] = os.path.join(model_dir, _checkpoint_name(spec, checkpoint_split))
+            extra_metrics = {
+                "selection_{}".format(spec.metric_name): selection_metric,
+                "test_{}".format(spec.metric_name): test_metric,
+                "checkpoint_metric_source": checkpoint_metric_source,
+            }
+            if val_metric is not None:
+                extra_metrics["val_{}".format(spec.metric_name)] = val_metric
             torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                    "best_metric": min_test_metric,
-                    "metric_name": spec.metric_name,
-                    "min_test_{}".format(spec.metric_name): min_test_metric,
-                    "board_devices": all_devices,
-                    "test_board": args.test_board,
-                    "arch_mode": args.arch_mode,
-                    "fabric_mode": args.fabric_mode,
-                    "arch_attr_fields": ARCH_ATTR_FIELDS,
-                    "architecture_cache": str(cache_path),
-                    "feature_stats": stats_to_jsonable(feature_stats),
-                    "target_scale": target_scale,
-                },
-                os.path.join(model_dir, _checkpoint_name(spec, "test")),
+                _checkpoint_payload(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    metric_value=min_selection_metric,
+                    metric_key="min_{}".format(checkpoint_metric_source),
+                    spec=spec,
+                    all_devices=all_devices,
+                    args=args,
+                    cache_path=cache_path,
+                    feature_stats=feature_stats,
+                    target_scale=target_scale,
+                    extra_metrics=extra_metrics,
+                ),
+                os.path.join(model_dir, _checkpoint_name(spec, checkpoint_split)),
             )
         history.append(
             {
                 "epoch": epoch,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "train_loss": train_loss,
+                "val_loss": val_loss,
                 "test_loss": test_loss,
                 "train_metric": train_metric,
+                "val_metric": val_metric,
                 "test_metric": test_metric,
+                "best_val_metric": min_val_metric if val_loader is not None else None,
                 "best_test_metric": min_test_metric,
+                "best_selection_metric": min_selection_metric,
             }
         )
 
     print("Min Train {}: {}".format(spec.metric_name.upper(), min_train_metric))
+    if val_loader is not None:
+        print("Min Val {}: {}".format(spec.metric_name.upper(), min_val_metric))
     print("Min Test {}: {}".format(spec.metric_name.upper(), min_test_metric))
+    print(
+        "Best Selection {} ({}): {}".format(
+            spec.metric_name.upper(),
+            checkpoint_metric_source,
+            min_selection_metric,
+        )
+    )
     summary = {
         "target": args.target,
         "min_train_metric": min_train_metric,
+        "min_val_metric": min_val_metric if val_loader is not None else None,
         "min_test_metric": min_test_metric,
+        "checkpoint_metric_source": checkpoint_metric_source,
+        "best_selection_metric": min_selection_metric,
         "metric_name": spec.metric_name,
         "checkpoints": checkpoint_paths,
         "history": history,
@@ -1029,6 +1160,12 @@ def build_parser():
     parser.add_argument("--deterministic-eval", action="store_true", help="disable shuffle/drop_last in eval loader")
     parser.add_argument("--init-checkpoint", default=None, help="path to a .pt checkpoint to warm-start from")
     parser.add_argument("--summary-path", default=None, help="write a JSON summary of the run to this path")
+    parser.add_argument(
+        "--checkpoint-metric-source",
+        choices=["auto", "test", "val"],
+        default="auto",
+        help="metric used to select the saved eval checkpoint; auto uses validation when available",
+    )
     parser.add_argument("--seed", type=int, default=128, help="random seed for data shuffle + split")
     parser.add_argument(
         "--train-boards",

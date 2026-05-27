@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import multiprocessing as mp
 import os
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -46,8 +48,6 @@ if str(_THIS_DIR) not in sys.path:
 if str(_HGBO_ROOT) not in sys.path:
     sys.path.insert(0, str(_HGBO_ROOT))
 
-from hgp.board_utils import normalize_device_name
-
 # Node feature sets matching the original HGBO-DSE convention.
 N_NUM_ITEMS_STD = ["m_delay", "latency", "bitwidth", "lut", "ff", "dsp"]
 N_NUM_ITEMS_RDC = ["m_delay", "latency"]
@@ -56,6 +56,7 @@ HLS_ATTR_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "CP"]
 
 DEFAULT_RAW_ROOT = _HGBO_ROOT / "dataset" / "raw"
 DEFAULT_OUTPUT_ROOT = _HGBO_ROOT / "dataset"
+ACTIVITY_MODES = ("auto", "none", "opcode", "shuffled")
 
 
 def _ensure_paths() -> None:
@@ -105,6 +106,52 @@ def _discover_bench_vers(raw_root: Path) -> list[tuple[str, str, Path]]:
     return results
 
 
+def _stable_activity_seed(seed_parts: tuple) -> int:
+    payload = "\0".join(str(part) for part in seed_parts)
+    digest = hashlib.sha256(payload.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+
+def _shuffle_activity_by_opcode(sa_by_opcode: dict, *, seed_parts: tuple) -> dict:
+    """Shuffle SA/AR metric dictionaries across opcodes deterministically."""
+    keys = sorted(sa_by_opcode)
+    values = [dict(sa_by_opcode[key]) for key in keys]
+    random.Random(_stable_activity_seed(seed_parts)).shuffle(values)
+    return {key: value for key, value in zip(keys, values)}
+
+
+def _load_activity_by_opcode(
+    top_name: str,
+    *,
+    activity_mode: str,
+    seed_parts: tuple = (),
+    cache_dir: Path | None = None,
+) -> dict | None:
+    """Load optional opcode-level switching activity according to ablation mode."""
+    if activity_mode not in ACTIVITY_MODES:
+        raise ValueError("unknown activity_mode {!r}".format(activity_mode))
+    if activity_mode == "none":
+        return None
+
+    cache_root = cache_dir or (_HGBO_ROOT / "dataset" / "switching_activity")
+    cache_file = cache_root / f"{top_name}_switching_activity.json"
+    if not cache_file.exists():
+        return None
+    try:
+        sa_data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    sa_by_opcode = sa_data.get("by_opcode", {})
+    if not sa_by_opcode:
+        return None
+    if activity_mode == "shuffled":
+        return _shuffle_activity_by_opcode(
+            sa_by_opcode,
+            seed_parts=(top_name, *seed_parts),
+        )
+    return sa_by_opcode
+
+
 def _process_one_sample(task: tuple) -> tuple:
     """Worker: process a single prj_<idx>/ directory.
 
@@ -115,7 +162,7 @@ def _process_one_sample(task: tuple) -> tuple:
 
     Args:
         task: ``(bench, ver, idx, bench_path_str, board_device, emit_dot,
-        timeout_s)``.
+        timeout_s, activity_mode)``.
 
     Returns:
         ``(bench, ver, idx, std_path, rdc_path, status)`` where ``std_path``
@@ -129,7 +176,7 @@ def _process_one_sample(task: tuple) -> tuple:
     from feature_encode import generate_pyg_dot
     from gen_dataframe import generate_dataframe
 
-    bench, ver, idx, bench_path_str, board_device, emit_dot, timeout_s = task
+    bench, ver, idx, bench_path_str, board_device, emit_dot, timeout_s, activity_mode = task
 
     # Per-sample SIGALRM watchdog. Pathological .adb files can wedge the
     # XML parser or CDFG construction; without this, one hang stalls a
@@ -159,17 +206,11 @@ def _process_one_sample(task: tuple) -> tuple:
         if top_name is None:
             return (bench, ver, idx, None, None, "skip:no_top")
 
-        # Load SA/AR switching activity cache for this kernel (optional).
-        sa_by_opcode: dict | None = None
-        sa_cache_dir = _HGBO_ROOT / "dataset" / "switching_activity"
-        sa_cache_file = sa_cache_dir / f"{top_name}_switching_activity.json"
-        if sa_cache_file.exists():
-            try:
-                import json as _json
-                _sa_data = _json.loads(sa_cache_file.read_text())
-                sa_by_opcode = _sa_data.get("by_opcode", {})
-            except Exception:
-                sa_by_opcode = None
+        sa_by_opcode = _load_activity_by_opcode(
+            top_name,
+            activity_mode=activity_mode,
+            seed_parts=(bench, ver, idx),
+        )
 
         cdfg_dir = bench_path / prj_name / "cdfg"
         cdfg_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +282,7 @@ def _build_tasks(
     device_override: str | None,
     emit_dot: bool,
     timeout_s: int,
+    activity_mode: str = "auto",
 ) -> list[tuple]:
     """Flatten bench/ver/prj_<idx> into a worker task list."""
     tasks: list[tuple] = []
@@ -255,7 +297,7 @@ def _build_tasks(
             except (IndexError, ValueError):
                 continue
             tasks.append(
-                (bench, ver, idx, str(bench_path), board_device, emit_dot, timeout_s)
+                (bench, ver, idx, str(bench_path), board_device, emit_dot, timeout_s, activity_mode)
             )
     return tasks
 
@@ -280,6 +322,8 @@ def _write_shards(
     total_std = 0
     total_rdc = 0
     all_keys = set(std_by_key.keys()) | set(rdc_by_key.keys())
+    from hgp.board_utils import normalize_device_name
+
     for bench, ver in sorted(all_keys):
         device_key = normalize_device_name(device_override or ver)
         if layout == "per_device":
@@ -372,6 +416,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="kill any single sample taking longer than this (seconds, 0 = unlimited)",
     )
     parser.add_argument(
+        "--activity-mode",
+        choices=ACTIVITY_MODES,
+        default="auto",
+        help=(
+            "switching-activity edge features: auto/opcode load opcode SA cache, "
+            "none disables SA/AR, shuffled preserves the cache distribution but breaks opcode mapping"
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=50,
@@ -406,6 +459,7 @@ def main(argv: list[str] | None = None) -> None:
         device_override=args.device,
         emit_dot=args.emit_dot,
         timeout_s=args.sample_timeout,
+        activity_mode=args.activity_mode,
     )
     if not tasks:
         print("No ppa_*.json samples found, nothing to do.")
