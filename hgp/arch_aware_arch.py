@@ -21,6 +21,11 @@ ARCH_AWARE_LAYOUT_ROWS = 80
 ARCH_AWARE_TILE_SLOTS = 4
 ARCH_AWARE_METADATA_DIM = 21
 DEFAULT_ARCH_AWARE_CACHE_DIR = Path(__file__).resolve().parents[1] / "dataset" / "board_arch"
+ARCH_AWARE_SVG_FILENAMES = {
+    "full_device_fabric": "{device}_arch_aware_full_device_fabric.svg",
+    "clock_region_fabric": "{device}_arch_aware_clock_region_fabric.svg",
+    "compressed_fabric": "{device}_arch_aware_compressed_fabric.svg",
+}
 
 ARCH_AWARE_TILE_TYPE_TO_ID = {
     "PAD": 0,
@@ -33,6 +38,16 @@ ARCH_AWARE_TILE_TYPE_TO_ID = {
     "BRK": 7,
 }
 ARCH_AWARE_TILE_ID_TO_TYPE = {value: key for key, value in ARCH_AWARE_TILE_TYPE_TO_ID.items()}
+ARCH_AWARE_TILE_COLORS = {
+    "PAD": "#f8fafc",
+    "CLEL": "#3b82f6",
+    "CLEM": "#22c55e",
+    "INT": "#94a3b8",
+    "INT_INTERFACE": "#f59e0b",
+    "DSP": "#ef4444",
+    "BRAM": "#8b5cf6",
+    "BRK": "#111827",
+}
 
 _XY_RE = re.compile(r"(?:^|_)X(?P<x>-?\d+)Y(?P<y>-?\d+)(?:_|$)")
 _CLOCK_REGION_RE = re.compile(r"X(?P<x>-?\d+)Y(?P<y>-?\d+)")
@@ -228,6 +243,281 @@ def _tile_x_y(tile: object) -> tuple[int, int]:
     return int(match.group("x")), int(match.group("y"))
 
 
+def _extract_arch_aware_cells(
+    raw_device: object,
+    *,
+    clock_region: object | None = None,
+) -> dict[tuple[int, int], list[int]]:
+    cells: dict[tuple[int, int], list[int]] = {}
+    for tile in _iter_tiles(raw_device):
+        if clock_region is not None and hasattr(clock_region, "containsTile"):
+            if not bool(clock_region.containsTile(tile)):
+                continue
+        tile_class = classify_arch_aware_tile(tile)
+        if tile_class is None:
+            continue
+        x, y = _tile_x_y(tile)
+        cells.setdefault((x, y), []).append(ARCH_AWARE_TILE_TYPE_TO_ID[tile_class])
+    return cells
+
+
+def _cells_bounds(cells: dict[tuple[int, int], list[int]]) -> tuple[int, int, int, int]:
+    min_x = min(x for x, _ in cells)
+    min_y = min(y for _, y in cells)
+    max_x = max(x for x, _ in cells)
+    max_y = max(y for _, y in cells)
+    return min_x, min_y, max_x, max_y
+
+
+def _slot_tile_ids(tile_ids: Iterable[int]) -> list[int]:
+    values = [int(tile_id) for tile_id in tile_ids if int(tile_id) != ARCH_AWARE_TILE_TYPE_TO_ID["PAD"]]
+    if not values:
+        return [ARCH_AWARE_TILE_TYPE_TO_ID["PAD"]]
+    return values[:ARCH_AWARE_TILE_SLOTS]
+
+
+def _svg_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _render_svg_header(
+    *,
+    title: str,
+    subtitle: str,
+    width: int,
+    height: int,
+) -> list[str]:
+    return [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="{0}" height="{1}" viewBox="0 0 {0} {1}">'.format(
+            width, height
+        ),
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        '<text x="18" y="26" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">{}</text>'.format(
+            _svg_escape(title)
+        ),
+        '<text x="18" y="46" font-family="Arial, sans-serif" font-size="12" fill="#475569">{}</text>'.format(
+            _svg_escape(subtitle)
+        ),
+    ]
+
+
+def _append_svg_legend(lines: list[str], *, x: int, y: int) -> None:
+    cursor_x = x
+    for tile_type in ARCH_AWARE_TILE_TYPE_TO_ID:
+        color = ARCH_AWARE_TILE_COLORS[tile_type]
+        lines.append(
+            '<rect x="{0}" y="{1}" width="12" height="12" fill="{2}" stroke="#ffffff" stroke-width="1"/>'.format(
+                cursor_x, y, color
+            )
+        )
+        lines.append(
+            '<text x="{0}" y="{1}" font-family="Arial, sans-serif" font-size="11" fill="#334155">{2}</text>'.format(
+                cursor_x + 16, y + 10, _svg_escape(tile_type)
+            )
+        )
+        cursor_x += 16 + len(tile_type) * 7 + 14
+
+
+def _write_cells_svg(
+    cells: dict[tuple[int, int], list[int]],
+    output_path: str | Path,
+    *,
+    title: str,
+    subtitle: str,
+    cell_size: int = 4,
+) -> Path:
+    if not cells:
+        raise ValueError("cannot render empty fabric cells")
+    min_x, min_y, max_x, max_y = _cells_bounds(cells)
+    cols = max_x - min_x + 1
+    rows = max_y - min_y + 1
+    margin_left = 18
+    margin_top = 70
+    width = max(760, margin_left * 2 + cols * cell_size)
+    height = margin_top + rows * cell_size + 52
+    lines = _render_svg_header(title=title, subtitle=subtitle, width=width, height=height)
+    _append_svg_legend(lines, x=18, y=height - 30)
+    lines.append(
+        '<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>'.format(
+            margin_left, margin_top, cols * cell_size, rows * cell_size
+        )
+    )
+    for (x, y), tile_ids in sorted(cells.items()):
+        col = x - min_x
+        row = max_y - y
+        slots = _slot_tile_ids(tile_ids)
+        slot_width = cell_size / len(slots)
+        for slot_index, tile_id in enumerate(slots):
+            tile_type = ARCH_AWARE_TILE_ID_TO_TYPE.get(tile_id, "PAD")
+            color = ARCH_AWARE_TILE_COLORS[tile_type]
+            lines.append(
+                '<rect x="{0:.2f}" y="{1}" width="{2:.2f}" height="{3}" fill="{4}"/>'.format(
+                    margin_left + col * cell_size + slot_index * slot_width,
+                    margin_top + row * cell_size,
+                    slot_width,
+                    cell_size,
+                    color,
+                )
+            )
+    lines.append("</svg>")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output
+
+
+def _write_layout_svg(
+    raw_layout: torch.Tensor,
+    output_path: str | Path,
+    *,
+    title: str,
+    subtitle: str,
+    valid_cols: int,
+    valid_rows: int,
+    cell_size: int = 6,
+) -> Path:
+    valid_cols = min(int(valid_cols), raw_layout.shape[0])
+    valid_rows = min(int(valid_rows), raw_layout.shape[1])
+    margin_left = 18
+    margin_top = 70
+    width = max(760, margin_left * 2 + valid_cols * cell_size)
+    height = margin_top + valid_rows * cell_size + 52
+    lines = _render_svg_header(title=title, subtitle=subtitle, width=width, height=height)
+    _append_svg_legend(lines, x=18, y=height - 30)
+    lines.append(
+        '<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>'.format(
+            margin_left, margin_top, valid_cols * cell_size, valid_rows * cell_size
+        )
+    )
+    for col in range(valid_cols):
+        for row in range(valid_rows):
+            slots = _slot_tile_ids(int(tile_id) for tile_id in raw_layout[col, row].view(-1))
+            if slots != [ARCH_AWARE_TILE_TYPE_TO_ID["PAD"]]:
+                slot_width = cell_size / len(slots)
+                svg_row = valid_rows - row - 1
+                for slot_index, tile_id in enumerate(slots):
+                    tile_type = ARCH_AWARE_TILE_ID_TO_TYPE.get(tile_id, "PAD")
+                    color = ARCH_AWARE_TILE_COLORS[tile_type]
+                    lines.append(
+                        '<rect x="{0:.2f}" y="{1}" width="{2:.2f}" height="{3}" fill="{4}"/>'.format(
+                            margin_left + col * cell_size + slot_index * slot_width,
+                            margin_top + svg_row * cell_size,
+                            slot_width,
+                            cell_size,
+                            color,
+                        )
+                    )
+    lines.append("</svg>")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output
+
+
+def _write_compressed_layout_svg(
+    compressed_layout: torch.Tensor,
+    output_path: str | Path,
+    *,
+    title: str,
+    subtitle: str,
+    valid_cols: int,
+    cell_size: int = 5,
+) -> Path:
+    layout = compressed_layout.detach().cpu()
+    positional_encoding = sinusoidal_positional_encoding().to(layout.dtype)
+    if layout.shape == positional_encoding.shape:
+        layout = layout - positional_encoding
+    valid_cols = min(int(valid_cols), layout.shape[0])
+    rows = ARCH_AWARE_TILE_SLOTS
+    margin_left = 18
+    margin_top = 70
+    width = max(760, margin_left * 2 + valid_cols * cell_size)
+    height = margin_top + rows * cell_size + 52
+    lines = _render_svg_header(title=title, subtitle=subtitle, width=width, height=height)
+    _append_svg_legend(lines, x=18, y=height - 30)
+    lines.append(
+        '<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>'.format(
+            margin_left, margin_top, valid_cols * cell_size, rows * cell_size
+        )
+    )
+    for col in range(valid_cols):
+        slot_values = layout[col, 0].round().to(torch.long).view(-1)
+        for slot_index in range(rows):
+            tile_id = int(slot_values[slot_index].item())
+            tile_type = ARCH_AWARE_TILE_ID_TO_TYPE.get(tile_id, "PAD")
+            color = ARCH_AWARE_TILE_COLORS[tile_type]
+            lines.append(
+                '<rect x="{0}" y="{1}" width="{2}" height="{2}" fill="{3}"/>'.format(
+                    margin_left + col * cell_size,
+                    margin_top + slot_index * cell_size,
+                    cell_size,
+                    color,
+                )
+            )
+    lines.append("</svg>")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output
+
+
+def arch_aware_svg_paths(device: str | None = None, *, cache_dir: str | Path | None = None) -> dict[str, Path]:
+    cache_root = Path(cache_dir) if cache_dir is not None else DEFAULT_ARCH_AWARE_CACHE_DIR
+    device_name = normalize_device_name(device)
+    return {
+        key: cache_root / template.format(device=device_name)
+        for key, template in ARCH_AWARE_SVG_FILENAMES.items()
+    }
+
+
+def arch_aware_svgs_exist(device: str | None = None, *, cache_dir: str | Path | None = None) -> bool:
+    return all(path.exists() for path in arch_aware_svg_paths(device, cache_dir=cache_dir).values())
+
+
+def _export_arch_aware_svgs(
+    *,
+    device_name: str,
+    full_cells: dict[tuple[int, int], list[int]],
+    payload: dict[str, object],
+    cache_dir: str | Path | None = None,
+) -> dict[str, Path]:
+    svg_paths = arch_aware_svg_paths(device_name, cache_dir=cache_dir)
+    clock_region = payload.get("arch_aware_clock_region") or "full device"
+    valid_cols = int(payload["arch_aware_valid_cols"])
+    valid_rows = int(payload["arch_aware_valid_rows"])
+    _write_cells_svg(
+        full_cells,
+        svg_paths["full_device_fabric"],
+        title="{} full device fabric".format(device_name),
+        subtitle="RapidWright tile classes before clock-region cropping",
+        cell_size=2,
+    )
+    _write_layout_svg(
+        payload["arch_aware_arch_layout_raw"],
+        svg_paths["clock_region_fabric"],
+        title="{} clock-region fabric".format(device_name),
+        subtitle="{} rebased into {}x{} raw tensor".format(clock_region, valid_cols, valid_rows),
+        valid_cols=valid_cols,
+        valid_rows=valid_rows,
+        cell_size=6,
+    )
+    _write_compressed_layout_svg(
+        payload["arch_aware_arch_layout"],
+        svg_paths["compressed_fabric"],
+        title="{} compressed fabric".format(device_name),
+        subtitle="First non-empty tile row per column plus sinusoidal positional encoding",
+        valid_cols=valid_cols,
+        cell_size=5,
+    )
+    return svg_paths
+
+
 def _compress_layout(raw_layout: torch.Tensor) -> torch.Tensor:
     """Collapse the ``[cols, rows, slots]`` raw layout into ``[cols, 1, slots]``.
 
@@ -247,7 +537,12 @@ def _compress_layout(raw_layout: torch.Tensor) -> torch.Tensor:
     return compressed
 
 
-def extract_arch_aware_architecture(device: str | None = None, *, clock_region: str | None = None) -> dict[str, object]:
+def extract_arch_aware_architecture(
+    device: str | None = None,
+    *,
+    clock_region: str | None = None,
+    svg_cache_dir: str | Path | None = None,
+) -> dict[str, object]:
     """Extract the arch-aware architecture payload for ``device``.
 
     Walks RapidWright's tile grid (optionally limited to a single clock region),
@@ -268,25 +563,14 @@ def extract_arch_aware_architecture(device: str | None = None, *, clock_region: 
         raise RuntimeError("Could not load RapidWright device {!r}".format(device_name))
 
     selected_clock_region = _select_clock_region(raw_device, clock_region)
-    cells: dict[tuple[int, int], list[int]] = {}
-    for tile in _iter_tiles(raw_device):
-        if selected_clock_region is not None and hasattr(selected_clock_region, "containsTile"):
-            if not bool(selected_clock_region.containsTile(tile)):
-                continue
-        tile_class = classify_arch_aware_tile(tile)
-        if tile_class is None:
-            continue
-        x, y = _tile_x_y(tile)
-        cells.setdefault((x, y), []).append(ARCH_AWARE_TILE_TYPE_TO_ID[tile_class])
+    full_cells = _extract_arch_aware_cells(raw_device)
+    cells = _extract_arch_aware_cells(raw_device, clock_region=selected_clock_region)
 
     if not cells:
         region_name = _clock_region_name(selected_clock_region)
         raise RuntimeError("RapidWright device {!r} produced no arch-aware tiles for {}".format(device_name, region_name))
 
-    min_x = min(x for x, _ in cells)
-    min_y = min(y for _, y in cells)
-    max_x = max(x for x, _ in cells)
-    max_y = max(y for _, y in cells)
+    min_x, min_y, max_x, max_y = _cells_bounds(cells)
     raw_cols = max_x - min_x + 1
     raw_rows = max_y - min_y + 1
 
@@ -330,7 +614,7 @@ def extract_arch_aware_architecture(device: str | None = None, *, clock_region: 
         fsr_count=fsr_count,
     )
 
-    return {
+    payload: dict[str, object] = {
         "device": device_name,
         "arch_aware_arch_layout_raw": raw_layout,
         "arch_aware_arch_layout": compressed.to(torch.float32),
@@ -341,6 +625,15 @@ def extract_arch_aware_architecture(device: str | None = None, *, clock_region: 
         "arch_aware_clock_region": _clock_region_name(selected_clock_region),
         "arch_aware_tile_type_to_id": dict(ARCH_AWARE_TILE_TYPE_TO_ID),
     }
+    if svg_cache_dir is not None:
+        svg_paths = _export_arch_aware_svgs(
+            device_name=device_name,
+            full_cells=full_cells,
+            payload=payload,
+            cache_dir=svg_cache_dir,
+        )
+        payload["arch_aware_svg_paths"] = {key: str(path) for key, path in svg_paths.items()}
+    return payload
 
 
 def arch_aware_arch_cache_path(device: str | None = None, *, cache_dir: str | Path | None = None) -> Path:
@@ -356,11 +649,11 @@ def ensure_arch_aware_arch_cache(
     clock_region: str | None = None,
 ) -> Path:
     output_path = arch_aware_arch_cache_path(device, cache_dir=cache_dir)
-    if output_path.exists() and not force:
+    if output_path.exists() and not force and arch_aware_svgs_exist(device, cache_dir=cache_dir):
         return output_path
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = extract_arch_aware_architecture(device, clock_region=clock_region)
+    payload = extract_arch_aware_architecture(device, clock_region=clock_region, svg_cache_dir=output_path.parent)
     torch.save(payload, output_path)
     return output_path
 

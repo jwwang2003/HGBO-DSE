@@ -37,19 +37,19 @@ _TB_DIR = Path(__file__).resolve().parent / "testbenches"
 
 # Mapping: kernel top-function name -> instrumented source file (self-contained)
 _INSTR_SOURCES: dict[str, str] = {
-    "atax":     "polybench/atax_instr.c",
-    "bicg":     "polybench/bicg_instr.c",
-    "gemm":     "polybench/gemm_instr.c",
-    "gesummv":  "polybench/gesummv_instr.c",
-    "k2mm":     "polybench/k2mm_instr.c",
-    "k3mm":     "polybench/k3mm_instr.c",
-    "mvt":      "polybench/mvt_instr.c",
-    "syr2k":    "polybench/syr2k_instr.c",
-    "syrk":     "polybench/syrk_instr.c",
-    "bfs":      "machsuite/bfs_instr.c",
-    "spmv":     "machsuite/spmv_instr.c",
-    "stencil":  "machsuite/stencil_instr.c",
-    "stencil3d":"machsuite/stencil3d_instr.c",
+    "atax":     "instrumented/polybench/atax_instr.c",
+    "bicg":     "instrumented/polybench/bicg_instr.c",
+    "gemm":     "instrumented/polybench/gemm_instr.c",
+    "gesummv":  "instrumented/polybench/gesummv_instr.c",
+    "k2mm":     "instrumented/polybench/k2mm_instr.c",
+    "k3mm":     "instrumented/polybench/k3mm_instr.c",
+    "mvt":      "instrumented/polybench/mvt_instr.c",
+    "syr2k":    "instrumented/polybench/syr2k_instr.c",
+    "syrk":     "instrumented/polybench/syrk_instr.c",
+    "bfs":      "instrumented/machsuite/bfs_instr.c",
+    "spmv":     "instrumented/machsuite/spmv_instr.c",
+    "stencil":  "instrumented/machsuite/stencil_instr.c",
+    "stencil3d":"instrumented/machsuite/stencil3d_instr.c",
 }
 
 

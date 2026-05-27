@@ -4,7 +4,9 @@ Inputs are the raw HLS-derived PyG sample shards under ``<input_root>/std/``
 and ``<input_root>/rdc/``. For each ``--device`` requested, the script:
 
   1. Ensures the RapidWright-derived arch-aware cache (and, optionally, the
-     fabric-graph cache) for that device exists under ``<cache-dir>``.
+     fabric-graph cache) for that device exists under ``<cache-dir>``. The
+     arch-aware extraction also exports SVG views of the full device fabric,
+     the selected clock-region fabric, and the compressed fabric tensor.
   2. Loads each sample shard, attaches the board profile + arch tensors via
      :func:`hgp.board_utils.augment_dataset`, and writes the augmented shards.
 
@@ -19,10 +21,11 @@ the flat layout for backwards-compatible single-device experiments.
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 try:
-    from hgp.arch_aware_arch import ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
+    from hgp.arch_aware_arch import arch_aware_svg_paths, ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
     from hgp.board_fabric import ensure_board_fabric_cache
     from hgp.board_utils import (
         DEFAULT_BOARD_DEVICE,
@@ -35,7 +38,7 @@ except ImportError:  # pragma: no cover - supports running from hgp/data_process
     import sys
 
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-    from hgp.arch_aware_arch import ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
+    from hgp.arch_aware_arch import arch_aware_svg_paths, ensure_arch_aware_arch_cache, load_arch_aware_arch_cache
     from hgp.board_fabric import ensure_board_fabric_cache
     from hgp.board_utils import (
         DEFAULT_BOARD_DEVICE,
@@ -84,7 +87,31 @@ def _augment_split(
         output_path = output_dir / input_path.name
         save_augmented_dataset(input_path, output_path, device=device, arch_aware_arch=arch_aware_payload)
         written.append(output_path)
+    _copy_arch_aware_svgs(arch_aware_payload, output_dir)
     return written
+
+
+def _copy_arch_aware_svgs(arch_aware_payload: dict[str, object] | None, output_dir: Path) -> list[Path]:
+    """Copy device-level arch-aware SVGs next to generated dataset shards."""
+    if not arch_aware_payload:
+        return []
+
+    raw_paths = arch_aware_payload.get("arch_aware_svg_paths")
+    if not isinstance(raw_paths, dict):
+        return []
+
+    copied: list[Path] = []
+    for source in raw_paths.values():
+        source_path = Path(str(source))
+        if not source_path.exists():
+            continue
+        destination = output_dir / source_path.name
+        if source_path.resolve() == destination.resolve():
+            copied.append(destination)
+            continue
+        shutil.copy2(source_path, destination)
+        copied.append(destination)
+    return copied
 
 
 def _resolve_split_input_dir(input_root: Path, split: str, device: str) -> Path | None:
@@ -125,6 +152,11 @@ def augment_dataset_dirs(
             clock_region=clock_region,
         )
         arch_aware_payload = load_arch_aware_arch_cache(arch_aware_cache)
+        if "arch_aware_svg_paths" not in arch_aware_payload:
+            arch_aware_payload["arch_aware_svg_paths"] = {
+                key: str(path)
+                for key, path in arch_aware_svg_paths(device, cache_dir=cache_root).items()
+            }
     if arch_mode in ("fabric", "both"):
         ensure_board_fabric_cache(device, cache_dir=cache_root, force=force_cache)
     return {
@@ -197,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cache-dir",
         default=None,
         help="directory for the extracted RapidWright fabric/arch cache "
-        "(default: <output_root>/board_arch)",
+        "and generated SVG fabric views (default: <output_root>/board_arch)",
     )
     parser.add_argument(
         "--force-cache",
