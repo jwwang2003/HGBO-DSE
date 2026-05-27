@@ -140,7 +140,6 @@ def build_opcode_sa_map(
                 "ar": sum(m["ar"] for m in metrics) / len(metrics),
             }
     return result
-    return bin(a ^ b).count("1")
 
 
 def compute_sa_ar(trace_lines: list[str]) -> dict[str, dict[str, float]]:
