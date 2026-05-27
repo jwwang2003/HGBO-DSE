@@ -129,19 +129,33 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
 
     for edge_id in DG.edges():
         edge = DG.edges[edge_id]
-        src_node_id = edge_id[0]
-        sa_val = 0.0
-        ar_val = 0.0
+        src_node_id, dst_node_id = edge_id[0], edge_id[1]
+        src_sa = 0.0
+        src_ar = 0.0
+        dst_sa = 0.0
+        dst_ar = 0.0
         if sa_by_opcode is not None:
-            src_opcode = DG.nodes[src_node_id].get("opcode", "")
-            metrics = sa_by_opcode.get(src_opcode, {})
-            sa_val = float(metrics.get("sa", 0.0))
-            ar_val = float(metrics.get("ar", 0.0))
+            src_node = DG.nodes[src_node_id]
+            dst_node = DG.nodes[dst_node_id]
+            src_opcode = src_node.get("opcode", "")
+            dst_opcode = dst_node.get("opcode", "")
+            src_metrics = sa_by_opcode.get(src_opcode, {})
+            dst_metrics = sa_by_opcode.get(dst_opcode, {})
+            # Scale SA by node bitwidth so 64-bit ops get higher switching
+            # activity than 32-bit ones with the same opcode.
+            src_bw = float(src_node.get("bitwidth", 32) or 32)
+            dst_bw = float(dst_node.get("bitwidth", 32) or 32)
+            src_sa = float(src_metrics.get("sa", 0.0)) * (src_bw / 32.0)
+            src_ar = float(src_metrics.get("ar", 0.0))
+            dst_sa = float(dst_metrics.get("sa", 0.0)) * (dst_bw / 32.0)
+            dst_ar = float(dst_metrics.get("ar", 0.0))
         pyg_DG.edges[edge_id]['edge_attr'] = [
             float(edge['edge_type']),
             float(edge['is_back_edge']),
-            sa_val,
-            ar_val,
+            src_sa,
+            src_ar,
+            dst_sa,
+            dst_ar,
         ]
 
     if dot_store_path:
