@@ -56,6 +56,7 @@ from hgp.data_process.operator_activity import (
     node_activity_from_cdfg_csv as _node_activity_from_cdfg_csv,
     node_activity_from_operator_merge as _node_activity_from_operator_merge,
 )
+from hgp.data_process.fsmd_binding import annotate_graph_with_fsmd
 
 # Node feature sets matching the original HGBO-DSE convention, extended with
 # ATAPP-style operator sharing and node switching features.
@@ -67,10 +68,28 @@ N_NUM_ITEMS_STD = [
     "ff",
     "dsp",
     "merged_node_count",
+    "operator_shared_count",
+    "operator_resource_type",
+    "fsmd_state",
+    "fsmd_stage",
+    "fsmd_latency",
+    "fsmd_mem_port_count",
     "activity_sa",
     "activity_ar",
 ]
-N_NUM_ITEMS_RDC = ["m_delay", "latency", "merged_node_count", "activity_sa", "activity_ar"]
+N_NUM_ITEMS_RDC = [
+    "m_delay",
+    "latency",
+    "merged_node_count",
+    "operator_shared_count",
+    "operator_resource_type",
+    "fsmd_state",
+    "fsmd_stage",
+    "fsmd_latency",
+    "fsmd_mem_port_count",
+    "activity_sa",
+    "activity_ar",
+]
 IMPL_METRIC_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "SRL", "CP", "PWR", "PWR_DYNAMIC"]
 HLS_ATTR_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "CP"]
 
@@ -200,6 +219,12 @@ def _merged_operator_attrs(rep_id: str, nodes: list[dict], operator_key: str) ->
         attrs[resource_key] = _merge_numeric(nodes, resource_key, mode="max")
     attrs["operator_key"] = operator_key
     attrs["merged_node_count"] = len(nodes)
+    attrs["operator_shared_count"] = max(_to_float(node.get("operator_shared_count"), 1.0) for node in nodes)
+    attrs["operator_resource_type"] = _merge_numeric(nodes, "operator_resource_type", mode="max")
+    attrs["fsmd_state"] = _merge_numeric(nodes, "fsmd_state", mode="min")
+    attrs["fsmd_stage"] = _merge_numeric(nodes, "fsmd_stage", mode="min")
+    attrs["fsmd_latency"] = _merge_numeric(nodes, "fsmd_latency", mode="max")
+    attrs["fsmd_mem_port_count"] = _merge_numeric(nodes, "fsmd_mem_port_count", mode="max")
     return attrs
 
 
@@ -433,6 +458,7 @@ def _process_one_sample(task: tuple) -> tuple:
                 sample_node_activity = _node_activity_from_operator_merge(
                     by_op_id=activity_payload.get("by_op_id", {}),
                     by_opcode=activity_payload.get("by_opcode", {}),
+                    by_node_id=activity_payload.get("by_node_id", {}),
                     cdfg_node_csv=cdfg_dir / "cdfg_node_dict.csv",
                 )
             else:
@@ -449,6 +475,7 @@ def _process_one_sample(task: tuple) -> tuple:
         DG = graph.G
         if DG is None or DG.number_of_nodes() == 0:
             return (bench, ver, idx, None, None, "skip:empty_graph")
+        annotate_graph_with_fsmd(DG, graph_dir)
         if operator_merge == "graph":
             original_DG = DG
             DG = _merge_graph_by_hardware_operator(DG)

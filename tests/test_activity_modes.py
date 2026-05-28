@@ -9,6 +9,7 @@ from hgp.data_process.ir_trace_instrument import (
     instrument_ir_text,
     normalize_ir_name,
 )
+from hgp.data_process.fsmd_binding import annotate_graph_with_fsmd, parse_fsmd_bindings
 from hgp.data_process.operator_activity import node_activity_from_operator_merge
 from hgp.data_process.switching_activity import compute_sa_ar
 
@@ -160,6 +161,40 @@ def test_operator_activity_merge_prefers_node_id_trace_ids(tmp_path):
         by_op_id={
             "1_36": {"sa": 2.0, "ar": 1.0},
             "1_41": {"sa": 6.0, "ar": 0.5},
+            "legacy": {"sa": 99.0, "ar": 1.0},
+        },
+        by_opcode={"fmul": {"sa": 1.0, "ar": 0.25}},
+        cdfg_node_csv=csv_path,
+    )
+
+    assert mapped == {
+        "1_36": {"sa": 4.0, "ar": 0.75},
+        "1_41": {"sa": 4.0, "ar": 0.75},
+    }
+
+
+def test_operator_activity_merge_prefers_explicit_node_activity(tmp_path):
+    csv_path = tmp_path / "cdfg_node_dict.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "node_id,rtl_name,opcode,trace_id",
+                "1_36,shared_mul,fmul,legacy",
+                "1_41,shared_mul,fmul,",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    mapped = node_activity_from_operator_merge(
+        by_node_id={
+            "1_36": {"sa": 2.0, "ar": 1.0},
+            "1_41": {"sa": 6.0, "ar": 0.5},
+        },
+        by_op_id={
+            "1_36": {"sa": 20.0, "ar": 1.0},
+            "1_41": {"sa": 60.0, "ar": 0.5},
             "legacy": {"sa": 99.0, "ar": 1.0},
         },
         by_opcode={"fmul": {"sa": 1.0, "ar": 0.25}},
@@ -471,7 +506,7 @@ def test_feature_encode_prefers_node_activity_over_opcode_fallback():
     )
 
     # src uses node-level SA scaled by 64/32; dst falls back to opcode-level SA.
-    assert encoded.edges["0_1", "0_2"]["edge_attr"] == [1.0, 0.0, 6.0, 0.9, 2.0, 0.2]
+    assert encoded.edges["0_1", "0_2"]["edge_attr"] == [1.0, 0.0, 6.0, 0.9, 2.0, 0.2, 0.0, 0.0, 0.0]
 
 
 def test_feature_encode_adds_node_switching_features():
@@ -500,3 +535,105 @@ def test_feature_encode_adds_node_switching_features():
     )
 
     assert encoded.nodes["0_1"]["x"][:7] == [1.0, 0.0, 1.0, 64.0, 2.0, 6.0, 0.9]
+
+
+def test_fsmd_binding_parser_skips_bind_sched_prefixes(tmp_path):
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    (graph_dir / "top.bind.adb").write_text(
+        """
+<root>
+  <state_list>
+    <state id="2" st_id="2">
+      <operation id="48" st_id="2" stage="2" lat="3">
+        <core>Cmp</core>
+        <MemPortIdVec>0 1</MemPortIdVec>
+        <Node id="28" bw="1"><![CDATA[%icmp = icmp_eq i7 %i, 64]]></Node>
+        <StgValue><ssdm name="icmp_ln11"/></StgValue>
+      </operation>
+    </state>
+  </state_list>
+</root>
+""",
+        encoding="utf-8",
+    )
+    (graph_dir / "top.sched.adb").write_text("<ignored/>", encoding="utf-8")
+    (graph_dir / "top.adb").write_text(
+        """
+<root>
+  <state_list>
+    <state id="2" st_id="2">
+      <operation id="48" st_id="2" stage="1" lat="2">
+        <core>Cmp</core>
+        <MemPortIdVec>0 1</MemPortIdVec>
+        <Node id="28" bw="1"><![CDATA[%icmp = icmp_eq i7 %i, 64]]></Node>
+        <StgValue><ssdm name="icmp_ln11"/></StgValue>
+      </operation>
+    </state>
+  </state_list>
+</root>
+""",
+        encoding="utf-8",
+    )
+    (graph_dir / "sub.adb").write_text(
+        """
+<root>
+  <state_list>
+    <state id="1" st_id="1">
+      <operation id="7" st_id="1" stage="3" lat="1">
+        <core>Adder</core>
+        <MemPortIdVec></MemPortIdVec>
+        <Node id="4" bw="32"><![CDATA[%add = add i32 %a, %b]]></Node>
+        <StgValue><ssdm name="add_ln"/></StgValue>
+      </operation>
+    </state>
+  </state_list>
+</root>
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_fsmd_bindings(graph_dir)
+
+    assert parsed["0_4"]["fsmd_module"] == "sub"
+    assert parsed["0_4"]["fsmd_stage"] == 3
+    assert parsed["1_28"]["fsmd_module"] == "top"
+    assert parsed["1_28"]["fsmd_artifact"] == "bind"
+    assert parsed["1_28"]["fsmd_stage"] == 2
+    assert parsed["1_28"]["fsmd_mem_port_count"] == 2
+
+
+def test_fsmd_annotation_adds_operator_metadata(tmp_path):
+    nx = __import__("networkx")
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    (graph_dir / "top.adb").write_text(
+        """
+<root>
+  <state_list>
+    <state id="5" st_id="5">
+      <operation id="10" st_id="5" stage="2" lat="3">
+        <core>RAM</core>
+        <MemPortIdVec>0</MemPortIdVec>
+        <Node id="7" bw="32"><![CDATA[%load = load i32 %A]]></Node>
+        <StgValue><ssdm name="load"/></StgValue>
+      </operation>
+    </state>
+  </state_list>
+</root>
+""",
+        encoding="utf-8",
+    )
+    graph = nx.DiGraph()
+    graph.add_node("0_7", node_type="0", opcode="load", core_name="RAM", rtl_name="not_exist")
+    graph.add_node("0_8", node_type="0", opcode="add", core_name="Adder", rtl_name="shared_add")
+    graph.add_node("0_9", node_type="0", opcode="add", core_name="Adder", rtl_name="shared_add")
+
+    stats = annotate_graph_with_fsmd(graph, graph_dir)
+
+    assert stats["annotated_nodes"] == 1
+    assert graph.nodes["0_7"]["fsmd_state"] == 5
+    assert graph.nodes["0_7"]["fsmd_stage"] == 2
+    assert graph.nodes["0_7"]["fsmd_mem_port_count"] == 1
+    assert graph.nodes["0_7"]["operator_resource_type"] == 2
+    assert graph.nodes["0_8"]["operator_shared_count"] == 2

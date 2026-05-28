@@ -2,6 +2,8 @@ import networkx as nx
 import numpy as np
 from sklearn.preprocessing import OneHotEncoder
 
+from hgp.data_process.fsmd_binding import fsmd_edge_attrs
+
 onehotFlag = 1
 
 n_categ_items = ['op_type', 'node_type']
@@ -80,6 +82,10 @@ def _node_numeric_feature(node, feat_item, node_id, by_node_id, by_opcode):
         return [_node_activity(node_id, node, by_node_id, by_opcode)[1]]
     if feat_item == 'merged_node_count':
         return [float(node.get(feat_item, 1) or 1)]
+    if feat_item == 'operator_shared_count':
+        return [float(node.get(feat_item, 1) or 1)]
+    if feat_item in {'fsmd_state', 'fsmd_stage', 'fsmd_latency', 'fsmd_mem_port_count', 'operator_resource_type'}:
+        return [float(node.get(feat_item, 0) or 0)]
     if feat_item not in node:
         if feat_item == 'latency':
             return [0.0, 0.0]
@@ -163,7 +169,7 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
             src_ar,
             dst_sa,
             dst_ar,
-        ]
+        ] + fsmd_edge_attrs(DG.nodes[src_node_id], DG.nodes[dst_node_id])
 
     if dot_store_path:
         nx.nx_pydot.write_dot(pyg_DG, dot_store_path)

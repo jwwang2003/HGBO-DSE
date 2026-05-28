@@ -63,9 +63,17 @@ def row_trace_id(row: dict) -> str:
     return ""
 
 
-def activity_for_cdfg_row(row: dict, by_op_id: dict, by_opcode: dict) -> dict[str, float] | None:
+def activity_for_cdfg_row(
+    row: dict,
+    by_op_id: dict,
+    by_opcode: dict,
+    by_node_id: dict | None = None,
+) -> dict[str, float] | None:
     node_id = clean_cell(row.get("node_id"))
     if node_id:
+        metrics = metric_pair((by_node_id or {}).get(node_id))
+        if metrics is not None:
+            return metrics
         metrics = metric_pair(by_op_id.get(node_id))
         if metrics is not None:
             return metrics
@@ -99,6 +107,7 @@ def node_activity_from_operator_merge(
     by_op_id: dict,
     by_opcode: dict,
     cdfg_node_csv: Path | None,
+    by_node_id: dict | None = None,
 ) -> dict:
     """Project trace/opcode activity through FSMD RTL operator sharing."""
     rows = read_cdfg_rows(cdfg_node_csv)
@@ -111,7 +120,7 @@ def node_activity_from_operator_merge(
         node_id = clean_cell(row.get("node_id"))
         if not node_id:
             continue
-        metrics = activity_for_cdfg_row(row, by_op_id, by_opcode)
+        metrics = activity_for_cdfg_row(row, by_op_id, by_opcode, by_node_id=by_node_id)
         if metrics is None:
             continue
         operator_key = hardware_operator_key(row, node_id=node_id)

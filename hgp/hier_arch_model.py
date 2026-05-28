@@ -611,7 +611,10 @@ def train_epoch(model, train_loader, optimizer, device, spec, board_embedding, a
     model.train()
     total_loss = 0
     total_metric = 0
-    batches_per_epoch = len(train_loader)
+    try:
+        batches_per_epoch = len(train_loader)
+    except TypeError:
+        batches_per_epoch = 1
     for batch_idx, data in enumerate(train_loader):
         _apply_warmup(optimizer, args, epoch, batch_idx, batches_per_epoch)
         data = data.to(device)
@@ -991,6 +994,8 @@ def run_training(args):
     min_val_metric = float("inf")
     min_test_metric = float("inf")
     min_selection_metric = float("inf")
+    selected_checkpoint_epoch = None
+    selected_checkpoint_metrics = None
     history = []
     checkpoint_paths = {}
     if args.epochs == 0:
@@ -1004,6 +1009,17 @@ def run_training(args):
         min_train_metric = train_metric
         min_test_metric = test_metric
         min_selection_metric = val_metric if checkpoint_metric_source == "val" else test_metric
+        selected_checkpoint_epoch = -1
+        selected_checkpoint_metrics = {
+            "epoch": -1,
+            "selection_metric": min_selection_metric,
+            "train_metric": train_metric,
+            "val_metric": val_metric,
+            "test_metric": test_metric,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "test_loss": test_loss,
+        }
         history.append(
             {
                 "epoch": -1,
@@ -1017,6 +1033,10 @@ def run_training(args):
                 "best_val_metric": min_val_metric if val_loader is not None else None,
                 "best_test_metric": min_test_metric,
                 "best_selection_metric": min_selection_metric,
+                "selected_checkpoint_epoch": selected_checkpoint_epoch,
+                "selected_train_metric": selected_checkpoint_metrics["train_metric"],
+                "selected_val_metric": selected_checkpoint_metrics["val_metric"],
+                "selected_test_metric": selected_checkpoint_metrics["test_metric"],
             }
         )
     for epoch in range(args.epochs):
@@ -1114,6 +1134,17 @@ def run_training(args):
             min_test_metric = test_metric
         if selection_metric < min_selection_metric:
             min_selection_metric = selection_metric
+            selected_checkpoint_epoch = epoch
+            selected_checkpoint_metrics = {
+                "epoch": epoch,
+                "selection_metric": selection_metric,
+                "train_metric": train_metric,
+                "val_metric": val_metric,
+                "test_metric": test_metric,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "test_loss": test_loss,
+            }
             checkpoint_paths[checkpoint_split] = os.path.join(model_dir, _checkpoint_name(spec, checkpoint_split))
             extra_metrics = {
                 "selection_{}".format(spec.metric_name): selection_metric,
@@ -1152,6 +1183,16 @@ def run_training(args):
                 "best_val_metric": min_val_metric if val_loader is not None else None,
                 "best_test_metric": min_test_metric,
                 "best_selection_metric": min_selection_metric,
+                "selected_checkpoint_epoch": selected_checkpoint_epoch,
+                "selected_train_metric": (
+                    selected_checkpoint_metrics["train_metric"] if selected_checkpoint_metrics else None
+                ),
+                "selected_val_metric": (
+                    selected_checkpoint_metrics["val_metric"] if selected_checkpoint_metrics else None
+                ),
+                "selected_test_metric": (
+                    selected_checkpoint_metrics["test_metric"] if selected_checkpoint_metrics else None
+                ),
             }
         )
 
@@ -1173,6 +1214,8 @@ def run_training(args):
         "min_test_metric": min_test_metric,
         "checkpoint_metric_source": checkpoint_metric_source,
         "best_selection_metric": min_selection_metric,
+        "selected_checkpoint_epoch": selected_checkpoint_epoch,
+        "selected_checkpoint_metrics": selected_checkpoint_metrics,
         "metric_name": spec.metric_name,
         "checkpoints": checkpoint_paths,
         "history": history,

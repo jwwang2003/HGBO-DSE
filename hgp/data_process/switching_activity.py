@@ -393,9 +393,11 @@ def extract_switching_activity(
     by_op_id = compute_sa_ar(trace)
     L = max((v["n"] for v in by_op_id.values()), default=1)
     by_opcode = build_opcode_sa_map(kernel_name, by_op_id)
+    by_trace_node_id = {key: value for key, value in by_op_id.items() if "_" in str(key)}
     by_node_id = node_activity_from_operator_merge(
         by_op_id=by_op_id,
         by_opcode=by_opcode,
+        by_node_id=by_trace_node_id,
         cdfg_node_csv=cdfg_node_csv,
     )
 
