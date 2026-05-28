@@ -420,9 +420,23 @@ def test_build_tasks_threads_activity_mode(tmp_path):
         timeout_s=5,
         activity_mode="shuffled",
         operator_merge="graph",
+        activity_cache_dir=tmp_path / "activity",
     )
 
-    assert tasks == [("bench", "device", 7, str(bench_path), "device", False, 5, "shuffled", "graph")]
+    assert tasks == [
+        (
+            "bench",
+            "device",
+            7,
+            str(bench_path),
+            "device",
+            False,
+            5,
+            "shuffled",
+            "graph",
+            str(tmp_path / "activity"),
+        )
+    ]
 
 
 def test_infer_top_name_ignores_pipeline_bind_and_sched_files(tmp_path):

@@ -354,7 +354,7 @@ def _process_one_sample(task: tuple) -> tuple:
 
     Args:
         task: ``(bench, ver, idx, bench_path_str, board_device, emit_dot,
-        timeout_s, activity_mode, operator_merge)``.
+        timeout_s, activity_mode, operator_merge, activity_cache_dir_str)``.
 
     Returns:
         ``(bench, ver, idx, std_path, rdc_path, status)`` where ``std_path``
@@ -368,7 +368,18 @@ def _process_one_sample(task: tuple) -> tuple:
     from feature_encode import generate_pyg_dot
     from gen_dataframe import generate_dataframe
 
-    bench, ver, idx, bench_path_str, board_device, emit_dot, timeout_s, activity_mode, operator_merge = task
+    (
+        bench,
+        ver,
+        idx,
+        bench_path_str,
+        board_device,
+        emit_dot,
+        timeout_s,
+        activity_mode,
+        operator_merge,
+        activity_cache_dir_str,
+    ) = task
     if operator_merge not in OPERATOR_MERGE_MODES:
         return (bench, ver, idx, None, None, "config_fail:unknown_operator_merge")
 
@@ -405,6 +416,7 @@ def _process_one_sample(task: tuple) -> tuple:
             top_name,
             activity_mode=activity_mode,
             seed_parts=(bench, ver, idx),
+            cache_dir=Path(activity_cache_dir_str) if activity_cache_dir_str else None,
         )
 
         cdfg_dir.mkdir(parents=True, exist_ok=True)
@@ -500,6 +512,7 @@ def _build_tasks(
     timeout_s: int,
     activity_mode: str = "auto",
     operator_merge: str = "activity",
+    activity_cache_dir: Path | None = None,
 ) -> list[tuple]:
     """Flatten bench/ver/prj_<idx> into a worker task list."""
     tasks: list[tuple] = []
@@ -514,7 +527,18 @@ def _build_tasks(
             except (IndexError, ValueError):
                 continue
             tasks.append(
-                (bench, ver, idx, str(bench_path), board_device, emit_dot, timeout_s, activity_mode, operator_merge)
+                (
+                    bench,
+                    ver,
+                    idx,
+                    str(bench_path),
+                    board_device,
+                    emit_dot,
+                    timeout_s,
+                    activity_mode,
+                    operator_merge,
+                    str(activity_cache_dir) if activity_cache_dir else None,
+                )
             )
     return tasks
 
@@ -653,6 +677,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--activity-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "directory containing <kernel>_switching_activity.json caches "
+            "(default: <repo>/dataset/switching_activity)"
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=50,
@@ -689,6 +722,7 @@ def main(argv: list[str] | None = None) -> None:
         timeout_s=args.sample_timeout,
         activity_mode=args.activity_mode,
         operator_merge=args.operator_merge,
+        activity_cache_dir=args.activity_cache_dir,
     )
     if not tasks:
         print("No ppa_*.json samples found, nothing to do.")
