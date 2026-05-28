@@ -7,7 +7,7 @@ onehotFlag = 1
 n_categ_items = ['op_type', 'node_type']
 
 opcode_categ = ['dadd', 'dsub', 'dmul', 'ddiv', 'call',
-                'add', 'sub', 'mul', 'div', 'icmp', 'dcmp', 'urem',
+                'add', 'sub', 'mul', 'div', 'fadd', 'fsub', 'fmul', 'fdiv', 'icmp', 'dcmp', 'fcmp', 'urem',
                 'and', 'or', 'xor', 'lshr', 'shl', 'ashr',
                 'select', 'bitselect', 'partselect', 'partset', 'mux', 'switch',
                 'load', 'store']
@@ -33,7 +33,7 @@ def onehot_enc_gen():
 _OPCODE_TO_TYPE = {}
 for _oc in ('dadd', 'dsub', 'dmul', 'ddiv', 'call'):
     _OPCODE_TO_TYPE[_oc] = 'db_op'
-for _oc in ('add', 'sub', 'mul', 'div', 'icmp', 'dcmp', 'urem'):
+for _oc in ('add', 'sub', 'mul', 'div', 'fadd', 'fsub', 'fmul', 'fdiv', 'icmp', 'dcmp', 'fcmp', 'urem'):
     _OPCODE_TO_TYPE[_oc] = 'sp_op'
 for _oc in ('and', 'or', 'xor', 'lshr', 'shl', 'ashr'):
     _OPCODE_TO_TYPE[_oc] = 'bit_op'
@@ -53,10 +53,53 @@ def opcode_type_numerical(opcode):
     return _OPTYPE_TO_NUM.get(_OPCODE_TO_TYPE.get(opcode, 'none'), 0.0)
 
 
+def _activity_maps(activity):
+    if activity is None:
+        return {}, {}
+    if "by_node_id" in activity or "by_opcode" in activity:
+        return activity.get("by_node_id", {}) or {}, activity.get("by_opcode", {}) or {}
+    # Backward compatibility: older callers passed the opcode map directly.
+    return {}, activity
+
+
+def _node_activity(node_id, node, by_node_id, by_opcode):
+    metrics = by_node_id.get(str(node_id))
+    if metrics is None:
+        metrics = by_opcode.get(node.get("opcode", ""), {})
+    bw = float(node.get("bitwidth", 32) or 32)
+    return (
+        float(metrics.get("sa", 0.0)) * (bw / 32.0),
+        float(metrics.get("ar", 0.0)),
+    )
+
+
+def _node_numeric_feature(node, feat_item, node_id, by_node_id, by_opcode):
+    if feat_item == 'activity_sa':
+        return [_node_activity(node_id, node, by_node_id, by_opcode)[0]]
+    if feat_item == 'activity_ar':
+        return [_node_activity(node_id, node, by_node_id, by_opcode)[1]]
+    if feat_item == 'merged_node_count':
+        return [float(node.get(feat_item, 1) or 1)]
+    if feat_item not in node:
+        if feat_item == 'latency':
+            return [0.0, 0.0]
+        return [0.0]
+    if feat_item == 'latency':
+        if not node[feat_item] or len(node[feat_item]) < 2:
+            return [0.0, 0.0]
+        return [float(node[feat_item][0]), float(node[feat_item][1])]
+    if type(node[feat_item]) in (int, float, str):
+        return [float(node[feat_item])]
+    raise AssertionError(
+        f"feat_item = {feat_item}, unexpected type {type(node[feat_item])}"
+    )
+
+
 def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
     pyg_DG = DG.__class__()
     pyg_DG.add_nodes_from(DG)
     pyg_DG.add_edges_from(DG.edges)
+    by_node_id, by_opcode = _activity_maps(sa_by_opcode)
 
     node_ids = list(DG.nodes())
     n_nodes = len(node_ids)
@@ -71,20 +114,7 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
             node = DG.nodes[node_id]
             node_feat = []
             for feat_item in n_num_items:
-                if feat_item not in node:
-                    if feat_item == 'latency':
-                        node_feat.extend([0.0, 0.0])
-                    else:
-                        node_feat.append(0.0)
-                else:
-                    if feat_item == 'latency':
-                        node_feat.extend([float(node[feat_item][0]), float(node[feat_item][1])])
-                    elif type(node[feat_item]) == int or type(node[feat_item]) == str:
-                        node_feat.append(float(node[feat_item]))
-                    else:
-                        raise AssertionError(
-                            f"feat_item = {feat_item}, unexpected type {type(node[feat_item])}"
-                        )
+                node_feat.extend(_node_numeric_feature(node, feat_item, node_id, by_node_id, by_opcode))
 
             num_feats_per_node.append(node_feat)
             n_opcode = node.get('opcode', 'none')
@@ -107,20 +137,7 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
             node = DG.nodes[node_id]
             node_feat = []
             for feat_item in n_num_items:
-                if feat_item not in node:
-                    if feat_item == 'latency':
-                        node_feat.extend([0.0, 0.0])
-                    else:
-                        node_feat.append(0.0)
-                else:
-                    if feat_item == 'latency':
-                        node_feat.extend([float(node[feat_item][0]), float(node[feat_item][1])])
-                    elif type(node[feat_item]) == int or type(node[feat_item]) == str:
-                        node_feat.append(float(node[feat_item]))
-                    else:
-                        raise AssertionError(
-                            f"feat_item = {feat_item}, unexpected type {type(node[feat_item])}"
-                        )
+                node_feat.extend(_node_numeric_feature(node, feat_item, node_id, by_node_id, by_opcode))
             n_opcode = node.get('opcode', 'none')
             n_optype = opcode_type_numerical(n_opcode)
             node_type_val = float(node['node_type'])
@@ -134,21 +151,11 @@ def generate_pyg_dot(DG, dot_store_path, n_num_items, sa_by_opcode=None):
         src_ar = 0.0
         dst_sa = 0.0
         dst_ar = 0.0
-        if sa_by_opcode is not None:
+        if by_node_id or by_opcode:
             src_node = DG.nodes[src_node_id]
             dst_node = DG.nodes[dst_node_id]
-            src_opcode = src_node.get("opcode", "")
-            dst_opcode = dst_node.get("opcode", "")
-            src_metrics = sa_by_opcode.get(src_opcode, {})
-            dst_metrics = sa_by_opcode.get(dst_opcode, {})
-            # Scale SA by node bitwidth so 64-bit ops get higher switching
-            # activity than 32-bit ones with the same opcode.
-            src_bw = float(src_node.get("bitwidth", 32) or 32)
-            dst_bw = float(dst_node.get("bitwidth", 32) or 32)
-            src_sa = float(src_metrics.get("sa", 0.0)) * (src_bw / 32.0)
-            src_ar = float(src_metrics.get("ar", 0.0))
-            dst_sa = float(dst_metrics.get("sa", 0.0)) * (dst_bw / 32.0)
-            dst_ar = float(dst_metrics.get("ar", 0.0))
+            src_sa, src_ar = _node_activity(src_node_id, src_node, by_node_id, by_opcode)
+            dst_sa, dst_ar = _node_activity(dst_node_id, dst_node, by_node_id, by_opcode)
         pyg_DG.edges[edge_id]['edge_attr'] = [
             float(edge['edge_type']),
             float(edge['is_back_edge']),

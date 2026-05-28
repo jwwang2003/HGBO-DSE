@@ -14,6 +14,7 @@ from hgp.hier_arch_model import (  # noqa: E402
     TARGET_SPECS,
     _default_dataset_dir,
     _resolve_device,
+    _resolve_conv_type,
     _select_checkpoint_metric_source,
     _set_cpu_threads,
     _prepare_board_training_input,
@@ -108,11 +109,23 @@ def test_parser_exposes_training_stability_flags():
     assert args.summary_path is None
     assert args.arch_mode == "arch-aware"
     assert args.fabric_mode == "cached"
-    assert args.conv_type == "gine"
+    assert args.conv_type == "auto"
     assert args.device == "cpu"
     assert args.num_workers == 0
     assert args.cpu_threads is None
     assert args.checkpoint_metric_source == "auto"
+
+
+def test_parser_accepts_atapp_edge_attention_encoder():
+    args = build_parser().parse_args(["--conv-type", "atapp"])
+
+    assert args.conv_type == "atapp"
+
+
+def test_auto_conv_type_uses_atapp_for_dynamic_power_only():
+    assert _resolve_conv_type("dynamic_power", "auto") == "atapp"
+    assert _resolve_conv_type("lut", "auto") == "gine"
+    assert _resolve_conv_type("dynamic_power", "gine") == "gine"
 
 
 def test_checkpoint_metric_source_auto_uses_validation_when_available():
@@ -424,6 +437,41 @@ def test_arch_aware_gine_design_encoder_uses_edge_attributes_in_forward():
         hidden_channels=4,
         num_layers=2,
         conv_type="gine",
+        design_edge_dim=2,
+        hls_dim=2,
+        arch_dim=13,
+        arch_mode="arch-aware",
+        arch_aware_hidden_dim=8,
+        arch_aware_output_dim=4,
+        drop_out=0.0,
+    )
+    x = torch.tensor([[1.0, 0.5], [0.3, 0.7], [0.9, 0.1]], dtype=torch.float32)
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    edge_attr = torch.tensor([[1.0, 0.0], [1.0, 0.0], [4.0, 1.0], [4.0, 1.0]], dtype=torch.float32)
+    shifted_edge_attr = edge_attr + torch.tensor([[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+    hls_attr = torch.tensor([[989.0, 5.393]], dtype=torch.float32)
+    arch_attr = torch.zeros((1, 13), dtype=torch.float32)
+    arch_aware_input = {
+        "arch_aware_arch_layout": torch.ones((ARCH_AWARE_LAYOUT_COLS, 1, ARCH_AWARE_TILE_SLOTS), dtype=torch.float32),
+        "arch_aware_arch_metadata": torch.ones((1, ARCH_AWARE_METADATA_DIM), dtype=torch.float32),
+    }
+
+    out_1 = model(x, edge_index, batch, hls_attr, arch_aware_input, arch_attr, edge_attr=edge_attr)
+    out_2 = model(x, edge_index, batch, hls_attr, arch_aware_input, arch_attr, edge_attr=shifted_edge_attr)
+
+    assert out_1.shape == (1, 1)
+    assert out_2.shape == (1, 1)
+    assert not torch.allclose(out_1, out_2)
+
+
+def test_atapp_design_encoder_uses_edge_attributes_in_forward():
+    torch.manual_seed(0)
+    model = ArchAwareHierNet(
+        in_channels=2,
+        hidden_channels=4,
+        num_layers=2,
+        conv_type="atapp",
         design_edge_dim=2,
         hls_dim=2,
         arch_dim=13,

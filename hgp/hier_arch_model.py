@@ -10,7 +10,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn.conv import GATConv, GCNConv, GINEConv, SAGEConv
+from torch_geometric.nn.conv import GATConv, GCNConv, GINEConv, SAGEConv, TransformerConv
 from torch_geometric.nn.dense import Linear
 from torch_geometric.nn.models import JumpingKnowledge
 from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool
@@ -51,6 +51,7 @@ from hgp.pyg_compat import SAGPooling
 
 TARGETS = ["lut", "ff", "dsp", "bram", "uram", "srl", "cp", "power", "dynamic_power"]
 ARCH_AWARE_MODE = "arch-aware"
+ATAPP_CONV_TYPE = "atapp"
 jknFlag = 0
 
 
@@ -114,14 +115,33 @@ def _make_design_conv(conv_type, in_channels, out_channels, edge_dim=None):
         if edge_dim is None:
             raise ValueError("conv_type='gine' requires design_edge_dim")
         return GINEConv(_make_mlp(in_channels, out_channels, out_channels), edge_dim=edge_dim)
+    if conv_type == ATAPP_CONV_TYPE:
+        if edge_dim is None:
+            raise ValueError("conv_type='atapp' requires design_edge_dim")
+        return TransformerConv(
+            in_channels,
+            out_channels,
+            heads=1,
+            concat=False,
+            edge_dim=edge_dim,
+            beta=True,
+        )
     raise ValueError("Unknown conv_type {!r}".format(conv_type))
 
 
+def _resolve_conv_type(target: str, conv_type: str) -> str:
+    if conv_type != "auto":
+        return conv_type
+    if target == "dynamic_power":
+        return ATAPP_CONV_TYPE
+    return "gine"
+
+
 def _apply_design_conv(conv, conv_type, x, edge_index, edge_attr=None):
-    if conv_type != "gine":
+    if conv_type not in {"gine", ATAPP_CONV_TYPE}:
         return conv(x, edge_index)
     if edge_attr is None:
-        raise ValueError("conv_type='gine' requires edge_attr in forward")
+        raise ValueError("conv_type={!r} requires edge_attr in forward".format(conv_type))
     return conv(x, edge_index, edge_attr.to(torch.float32))
 
 
@@ -228,6 +248,57 @@ class ArchAwareArchitectureEncoder(torch.nn.Module):
         return self.mlp(torch.cat([flat_layout, metadata], dim=-1))
 
 
+class AtappDesignEncoder(torch.nn.Module):
+    """ATAPP-style edge-aware design encoder.
+
+    ATAPP uses UniMP-style edge-aware attention and sums graph embeddings across
+    layers. PyG's TransformerConv with edge_dim is the closest available local
+    primitive in this codebase.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        hidden_channels,
+        num_layers,
+        edge_dim,
+        drop_out=0.0,
+    ):
+        super().__init__()
+        if edge_dim is None:
+            raise ValueError("ATAPP design encoder requires edge attributes")
+        self.drop_out = drop_out
+        self.layers = torch.nn.ModuleList()
+        self.norms = torch.nn.ModuleList()
+        for index in range(num_layers):
+            layer_in = in_channels if index == 0 else hidden_channels
+            self.layers.append(
+                TransformerConv(
+                    layer_in,
+                    hidden_channels,
+                    heads=1,
+                    concat=False,
+                    edge_dim=edge_dim,
+                    beta=True,
+                )
+            )
+            self.norms.append(torch.nn.BatchNorm1d(hidden_channels))
+        self.output_dim = hidden_channels
+
+    def forward(self, x, edge_index, batch, edge_attr):
+        if edge_attr is None:
+            raise ValueError("ATAPP design encoder requires edge_attr in forward")
+        h = x
+        pooled_layers = []
+        for layer, norm in zip(self.layers, self.norms):
+            h = layer(h, edge_index, edge_attr.to(torch.float32))
+            h = norm(h)
+            h = F.relu(h)
+            h = F.dropout(h, p=self.drop_out, training=self.training)
+            pooled_layers.append(global_add_pool(h, batch))
+        return sum(pooled_layers)
+
+
 class ArchAwareHierNet(torch.nn.Module):
     def __init__(
         self,
@@ -258,15 +329,27 @@ class ArchAwareHierNet(torch.nn.Module):
         self.conv_type = conv_type
         self.arch_mode = arch_mode
 
+        self.atapp_encoder = None
         self.convs = torch.nn.ModuleList()
         self.pools = torch.nn.ModuleList()
 
-        for i in range(num_layers):
-            if i == 0:
-                self.convs.append(_make_design_conv(conv_type, in_channels, hidden_channels, design_edge_dim))
-            else:
-                self.convs.append(_make_design_conv(conv_type, hidden_channels, hidden_channels, design_edge_dim))
-            self.pools.append(SAGPooling(hidden_channels, self.pool_ratio))
+        if conv_type == ATAPP_CONV_TYPE:
+            self.atapp_encoder = AtappDesignEncoder(
+                in_channels,
+                hidden_channels,
+                num_layers,
+                design_edge_dim,
+                drop_out=drop_out,
+            )
+            design_embedding_dim = hidden_channels
+        else:
+            for i in range(num_layers):
+                if i == 0:
+                    self.convs.append(_make_design_conv(conv_type, in_channels, hidden_channels, design_edge_dim))
+                else:
+                    self.convs.append(_make_design_conv(conv_type, hidden_channels, hidden_channels, design_edge_dim))
+                self.pools.append(SAGPooling(hidden_channels, self.pool_ratio))
+            design_embedding_dim = hidden_channels * 2
         if jknFlag:
             self.jkn = JumpingKnowledge("lstm", channels=hidden_channels, num_layers=2)
 
@@ -293,9 +376,9 @@ class ArchAwareHierNet(torch.nn.Module):
             output_dim=arch_aware_output_dim,
         )
         if arch_mode == ARCH_AWARE_MODE:
-            self.channels = [hidden_channels * 2 + hls_dim + arch_aware_output_dim, 64, 64, 1]
+            self.channels = [design_embedding_dim + hls_dim + arch_aware_output_dim, 64, 64, 1]
         else:
-            self.channels = [hidden_channels * 2 + hls_dim + arch_hidden_dim + fabric_hidden_dim, 64, 64, 1]
+            self.channels = [design_embedding_dim + hls_dim + arch_hidden_dim + fabric_hidden_dim, 64, 64, 1]
         self.mlps = torch.nn.ModuleList()
 
         for i in range(len(self.channels) - 1):
@@ -333,21 +416,21 @@ class ArchAwareHierNet(torch.nn.Module):
             else:
                 arch_graph = torch.zeros((1, self.arch_graph_dim), dtype=torch.float32, device=x.device)
         arch_attr = arch_attr.to(torch.float32)
-        h_list = []
+        if self.atapp_encoder is not None:
+            x = self.atapp_encoder(x, edge_index, batch, edge_attr)
+        else:
+            h_list = []
+            for step in range(len(self.convs)):
+                x = _apply_design_conv(self.convs[step], self.conv_type, x, edge_index, edge_attr)
+                x = F.relu(x)
+                x = F.dropout(x, p=self.drop_out, training=self.training)
+                x, edge_index, edge_attr, batch, _, _ = self.pools[step](x, edge_index, edge_attr, batch, None)
+                h = self._pool(x, batch)
+                h_list.append(h)
 
-        for step in range(len(self.convs)):
-            x = _apply_design_conv(self.convs[step], self.conv_type, x, edge_index, edge_attr)
-            x = F.relu(x)
-            x = F.dropout(x, p=self.drop_out, training=self.training)
-            x, edge_index, edge_attr, batch, _, _ = self.pools[step](x, edge_index, edge_attr, batch, None)
-            h = self._pool(x, batch)
-            h_list.append(h)
-
-        if jknFlag:
-            x = self.jkn(h_list)
-        x = h_list[0] + h_list[1] + h_list[2] if len(h_list) >= 3 else sum(h_list)
-        # TODO: when num_layers > 3, layers >= 3 are dropped from readout.
-        # Consider using sum(h_list) unconditionally or JKN.
+            if jknFlag:
+                x = self.jkn(h_list)
+            x = sum(h_list)
         board_embedding = self._board_embedding(arch_graph)
         if board_embedding.size(0) != x.size(0):
             board_embedding = board_embedding.expand(x.size(0), -1)
@@ -741,6 +824,7 @@ def _write_summary(args, summary):
 def run_training(args):
     active_threads = _set_cpu_threads(args.cpu_threads)
     spec = TARGET_SPECS[args.target]
+    args.conv_type = _resolve_conv_type(args.target, args.conv_type)
 
     # Resolve devices.
     all_devices = _resolve_all_devices(args)
@@ -1149,7 +1233,12 @@ def build_parser():
     parser.add_argument("--arch-cache-dir", default=None, help="directory for RapidWright-derived arch caches")
     parser.add_argument("--arch-mode", choices=[ARCH_AWARE_MODE, "fabric"], default=ARCH_AWARE_MODE, help="architecture encoding strategy")
     parser.add_argument("--fabric-mode", choices=["cached", "trainable"], default="cached", help="whether the fabric encoder receives gradients")
-    parser.add_argument("--conv-type", choices=["gcn", "gat", "sage", "gine"], default="gine", help="GNN convolution type")
+    parser.add_argument(
+        "--conv-type",
+        choices=["auto", "gcn", "gat", "sage", "gine", ATAPP_CONV_TYPE],
+        default="auto",
+        help="design GNN type; auto uses atapp for dynamic_power and gine for other targets",
+    )
     parser.add_argument("--drop-out", type=float, default=0.0, help="dropout probability")
     parser.add_argument("--lr", type=float, default=0.001, help="initial learning rate")
     parser.add_argument("--lr-decay-factor", type=float, default=0.9, help="multiplicative LR decay factor")

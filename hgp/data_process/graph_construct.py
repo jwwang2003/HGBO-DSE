@@ -2,9 +2,13 @@ import os
 import csv
 import glob
 import networkx as nx
-import graphviz as gvz
 from feature_basic import *
 import xml.etree.cElementTree as cET
+
+try:
+    import graphviz as gvz
+except ImportError:
+    gvz = None
 
 
 constFlag = 1  # whether extract const: 1/0
@@ -25,7 +29,8 @@ bypassList = ['br', 'ret', 'phi', 'dacc', 'extractvalue', 'insertvalue',
               'not_exist']
 
 # focus opcode
-focusList = ['add', 'sub', 'mul', 'div', 'dadd', 'dsub', 'dmul', 'ddiv', 'icmp', 'dcmp', 'urem',
+focusList = ['add', 'sub', 'mul', 'div', 'fadd', 'fsub', 'fmul', 'fdiv',
+             'dadd', 'dsub', 'dmul', 'ddiv', 'icmp', 'dcmp', 'fcmp', 'urem',
              'and', 'or', 'xor', 'lshr', 'shl', 'ashr',
              'select', 'bitselect', 'partselect', 'partset', 'mux', 'switch',
              'load', 'store', 'call']
@@ -787,6 +792,8 @@ class CDFG:
     def visualize_graph(self, save_path):
         nx.nx_pydot.write_dot(self.G, '{}/G.dot'.format(save_path))
         if plotFlag:
+            if gvz is None:
+                raise RuntimeError("graphviz is required when plotFlag is enabled")
             gvz_graph = gvz.Digraph(format='png', filename='{}/test_G'.format(save_path))
             gvz_graph.attr('node', fontsize='20')
             gvz_graph.attr('edge', arrowsize='1', fontsize='20')

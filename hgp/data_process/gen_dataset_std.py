@@ -48,15 +48,36 @@ if str(_THIS_DIR) not in sys.path:
 if str(_HGBO_ROOT) not in sys.path:
     sys.path.insert(0, str(_HGBO_ROOT))
 
-# Node feature sets matching the original HGBO-DSE convention.
-N_NUM_ITEMS_STD = ["m_delay", "latency", "bitwidth", "lut", "ff", "dsp"]
-N_NUM_ITEMS_RDC = ["m_delay", "latency"]
+from hgp.data_process.operator_activity import (
+    clean_cell as _clean_cell,
+    hardware_operator_key as _hardware_operator_key,
+    mean_metric as _mean_metric,
+    metric_pair as _metric_pair,
+    node_activity_from_cdfg_csv as _node_activity_from_cdfg_csv,
+    node_activity_from_operator_merge as _node_activity_from_operator_merge,
+)
+
+# Node feature sets matching the original HGBO-DSE convention, extended with
+# ATAPP-style operator sharing and node switching features.
+N_NUM_ITEMS_STD = [
+    "m_delay",
+    "latency",
+    "bitwidth",
+    "lut",
+    "ff",
+    "dsp",
+    "merged_node_count",
+    "activity_sa",
+    "activity_ar",
+]
+N_NUM_ITEMS_RDC = ["m_delay", "latency", "merged_node_count", "activity_sa", "activity_ar"]
 IMPL_METRIC_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "SRL", "CP", "PWR", "PWR_DYNAMIC"]
 HLS_ATTR_KEYS = ["LUT", "FF", "DSP", "BRAM", "URAM", "CP"]
 
 DEFAULT_RAW_ROOT = _HGBO_ROOT / "dataset" / "raw"
 DEFAULT_OUTPUT_ROOT = _HGBO_ROOT / "dataset"
-ACTIVITY_MODES = ("auto", "none", "opcode", "shuffled")
+ACTIVITY_MODES = ("auto", "none", "node", "opcode", "shuffled")
+OPERATOR_MERGE_MODES = ("none", "activity", "graph")
 
 
 def _ensure_paths() -> None:
@@ -120,14 +141,149 @@ def _shuffle_activity_by_opcode(sa_by_opcode: dict, *, seed_parts: tuple) -> dic
     return {key: value for key, value in zip(keys, values)}
 
 
-def _load_activity_by_opcode(
+def _to_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _merge_numeric(nodes: list[dict], key: str, mode: str = "max") -> str:
+    values = [_to_float(node.get(key), 0.0) for node in nodes]
+    if not values:
+        return "0"
+    if mode == "min":
+        return str(min(values))
+    if mode == "mean":
+        return str(sum(values) / len(values))
+    return str(max(values))
+
+
+def _merge_latency(nodes: list[dict]) -> list[str]:
+    starts: list[float] = []
+    ends: list[float] = []
+    for node in nodes:
+        latency = node.get("latency")
+        if isinstance(latency, (list, tuple)) and len(latency) >= 2:
+            starts.append(_to_float(latency[0], 0.0))
+            ends.append(_to_float(latency[1], 0.0))
+    if not starts:
+        return []
+    return [str(min(starts)), str(max(ends))]
+
+
+def _common_or_first(nodes: list[dict], key: str, default: str = "not_exist") -> str:
+    values = [_clean_cell(node.get(key)) for node in nodes if _clean_cell(node.get(key))]
+    if not values:
+        return default
+    first = values[0]
+    if all(value == first for value in values):
+        return first
+    return first
+
+
+def _merged_operator_attrs(rep_id: str, nodes: list[dict], operator_key: str) -> dict:
+    attrs = dict(nodes[0])
+    attrs["node_name"] = _common_or_first(nodes, "node_name", default=rep_id)
+    attrs["node_type"] = "0"
+    attrs["line_num"] = _merge_numeric(nodes, "line_num", mode="min")
+    attrs["rtl_name"] = operator_key.split(":", 1)[1] if operator_key.startswith("rtl:") else attrs.get("rtl_name", "not_exist")
+    attrs["op_type"] = _common_or_first(nodes, "op_type")
+    attrs["core_name"] = _common_or_first(nodes, "core_name")
+    attrs["bitwidth"] = _merge_numeric(nodes, "bitwidth", mode="max")
+    attrs["opcode"] = _common_or_first(nodes, "opcode", default="none")
+    attrs["m_delay"] = _merge_numeric(nodes, "m_delay", mode="max")
+    attrs["topo_index"] = _merge_numeric(nodes, "topo_index", mode="min")
+    attrs["oprand_edges"] = []
+    attrs["latency"] = _merge_latency(nodes)
+    for resource_key in ("lut", "ff", "dsp", "bram", "uram"):
+        attrs[resource_key] = _merge_numeric(nodes, resource_key, mode="max")
+    attrs["operator_key"] = operator_key
+    attrs["merged_node_count"] = len(nodes)
+    return attrs
+
+
+def _merge_graph_by_hardware_operator(DG):
+    """Collapse CDFG nodes sharing the same RTL operator into one graph node."""
+    import networkx as nx
+
+    operator_to_nodes: dict[str, list[str]] = defaultdict(list)
+    node_to_rep: dict[str, str] = {}
+    for node_id, node in DG.nodes(data=True):
+        node_type = _clean_cell(node.get("node_type"))
+        if node_type == "0":
+            operator_key = _hardware_operator_key(node, node_id=str(node_id))
+        else:
+            operator_key = "node:{}".format(node_id)
+        operator_to_nodes[operator_key].append(node_id)
+
+    for operator_key, node_ids in operator_to_nodes.items():
+        node_to_rep.update({node_id: node_ids[0] for node_id in node_ids})
+
+    merged = nx.DiGraph()
+    for operator_key, node_ids in operator_to_nodes.items():
+        rep_id = node_ids[0]
+        nodes = [DG.nodes[node_id] for node_id in node_ids]
+        if operator_key.startswith("rtl:") and len(node_ids) > 1:
+            merged.add_node(rep_id, **_merged_operator_attrs(rep_id, nodes, operator_key))
+        else:
+            attrs = dict(nodes[0])
+            attrs["operator_key"] = operator_key
+            attrs["merged_node_count"] = len(node_ids)
+            merged.add_node(rep_id, **attrs)
+
+    for src, dst, edge in DG.edges(data=True):
+        new_src = node_to_rep.get(src, src)
+        new_dst = node_to_rep.get(dst, dst)
+        if new_src == new_dst:
+            continue
+        attrs = {
+            "edge_id": edge.get("edge_id", "0"),
+            "edge_type": edge.get("edge_type", "0"),
+            "is_back_edge": edge.get("is_back_edge", "0"),
+        }
+        if merged.has_edge(new_src, new_dst):
+            old = merged.edges[new_src, new_dst]
+            old["edge_type"] = str(max(_to_float(old.get("edge_type")), _to_float(attrs["edge_type"])))
+            old["is_back_edge"] = str(max(_to_float(old.get("is_back_edge")), _to_float(attrs["is_back_edge"])))
+        else:
+            merged.add_edge(new_src, new_dst, **attrs)
+    return merged
+
+
+def _remap_activity_to_merged_graph(activity_payload: dict | None, original_DG, merged_DG) -> dict | None:
+    if not activity_payload or "by_node_id" not in activity_payload:
+        return activity_payload
+    by_node_id = activity_payload.get("by_node_id") or {}
+    if not by_node_id:
+        return activity_payload
+
+    by_operator: dict[str, list[dict[str, float]]] = defaultdict(list)
+    for node_id, metrics in by_node_id.items():
+        if node_id not in original_DG.nodes:
+            continue
+        operator_key = _hardware_operator_key(original_DG.nodes[node_id], node_id=str(node_id))
+        metric_pair = _metric_pair(metrics)
+        if metric_pair is not None:
+            by_operator[operator_key].append(metric_pair)
+
+    merged_by_node: dict[str, dict[str, float]] = {}
+    for node_id, node in merged_DG.nodes(data=True):
+        operator_key = node.get("operator_key") or _hardware_operator_key(node, node_id=str(node_id))
+        if operator_key in by_operator:
+            merged_by_node[str(node_id)] = _mean_metric(by_operator[operator_key])
+
+    return {**activity_payload, "by_node_id": merged_by_node}
+
+
+def _load_activity_payload(
     top_name: str,
     *,
     activity_mode: str,
     seed_parts: tuple = (),
     cache_dir: Path | None = None,
 ) -> dict | None:
-    """Load optional opcode-level switching activity according to ablation mode."""
+    """Load optional ATAPP-style switching activity according to ablation mode."""
     if activity_mode not in ACTIVITY_MODES:
         raise ValueError("unknown activity_mode {!r}".format(activity_mode))
     if activity_mode == "none":
@@ -141,15 +297,51 @@ def _load_activity_by_opcode(
         sa_data = json.loads(cache_file.read_text(encoding="utf-8"))
     except Exception:
         return None
-    sa_by_opcode = sa_data.get("by_opcode", {})
-    if not sa_by_opcode:
-        return None
+
+    sa_by_opcode = sa_data.get("by_opcode", {}) or {}
+    sa_by_node = sa_data.get("by_node_id", {}) or {}
     if activity_mode == "shuffled":
-        return _shuffle_activity_by_opcode(
-            sa_by_opcode,
-            seed_parts=(top_name, *seed_parts),
-        )
-    return sa_by_opcode
+        if not sa_by_opcode:
+            return None
+        return {
+            "by_opcode": _shuffle_activity_by_opcode(
+                sa_by_opcode,
+                seed_parts=(top_name, *seed_parts),
+            )
+        }
+
+    if activity_mode == "opcode":
+        return {"by_opcode": sa_by_opcode} if sa_by_opcode else None
+    if activity_mode == "node":
+        return {"by_node_id": sa_by_node} if sa_by_node else None
+    if not sa_by_node and not sa_by_opcode:
+        return None
+    return {
+        "by_node_id": sa_by_node,
+        "by_opcode": sa_by_opcode,
+        "by_op_id": sa_data.get("by_op_id", {}) or {},
+    }
+
+
+def _load_activity_by_opcode(
+    top_name: str,
+    *,
+    activity_mode: str,
+    seed_parts: tuple = (),
+    cache_dir: Path | None = None,
+) -> dict | None:
+    """Backward-compatible loader returning opcode-level SA/AR only."""
+    payload = _load_activity_payload(
+        top_name,
+        activity_mode=activity_mode,
+        seed_parts=seed_parts,
+        cache_dir=cache_dir,
+    )
+    if payload is None:
+        return None
+    if "by_opcode" in payload:
+        return payload.get("by_opcode") or None
+    return None
 
 
 def _process_one_sample(task: tuple) -> tuple:
@@ -162,7 +354,7 @@ def _process_one_sample(task: tuple) -> tuple:
 
     Args:
         task: ``(bench, ver, idx, bench_path_str, board_device, emit_dot,
-        timeout_s, activity_mode)``.
+        timeout_s, activity_mode, operator_merge)``.
 
     Returns:
         ``(bench, ver, idx, std_path, rdc_path, status)`` where ``std_path``
@@ -176,7 +368,9 @@ def _process_one_sample(task: tuple) -> tuple:
     from feature_encode import generate_pyg_dot
     from gen_dataframe import generate_dataframe
 
-    bench, ver, idx, bench_path_str, board_device, emit_dot, timeout_s, activity_mode = task
+    bench, ver, idx, bench_path_str, board_device, emit_dot, timeout_s, activity_mode, operator_merge = task
+    if operator_merge not in OPERATOR_MERGE_MODES:
+        return (bench, ver, idx, None, None, "config_fail:unknown_operator_merge")
 
     # Per-sample SIGALRM watchdog. Pathological .adb files can wedge the
     # XML parser or CDFG construction; without this, one hang stalls a
@@ -192,6 +386,7 @@ def _process_one_sample(task: tuple) -> tuple:
     prj_name = f"prj_{idx}"
     ppa_path = bench_path / "script" / f"ppa_{idx}.json"
     graph_dir = bench_path / prj_name / "graph"
+    cdfg_dir = bench_path / prj_name / "cdfg"
 
     std_path: str | None = None
     rdc_path: str | None = None
@@ -206,13 +401,12 @@ def _process_one_sample(task: tuple) -> tuple:
         if top_name is None:
             return (bench, ver, idx, None, None, "skip:no_top")
 
-        sa_by_opcode = _load_activity_by_opcode(
+        activity_payload = _load_activity_payload(
             top_name,
             activity_mode=activity_mode,
             seed_parts=(bench, ver, idx),
         )
 
-        cdfg_dir = bench_path / prj_name / "cdfg"
         cdfg_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -222,9 +416,31 @@ def _process_one_sample(task: tuple) -> tuple:
         except Exception as exc:
             return (bench, ver, idx, None, None, f"cdfg_fail:{exc}")
 
+        if activity_payload and activity_mode == "auto":
+            if operator_merge in {"activity", "graph"}:
+                sample_node_activity = _node_activity_from_operator_merge(
+                    by_op_id=activity_payload.get("by_op_id", {}),
+                    by_opcode=activity_payload.get("by_opcode", {}),
+                    cdfg_node_csv=cdfg_dir / "cdfg_node_dict.csv",
+                )
+            else:
+                sample_node_activity = _node_activity_from_cdfg_csv(
+                    activity_payload.get("by_op_id", {}),
+                    cdfg_dir / "cdfg_node_dict.csv",
+                )
+            if sample_node_activity:
+                activity_payload = {
+                    **activity_payload,
+                    "by_node_id": sample_node_activity,
+                }
+
         DG = graph.G
         if DG is None or DG.number_of_nodes() == 0:
             return (bench, ver, idx, None, None, "skip:empty_graph")
+        if operator_merge == "graph":
+            original_DG = DG
+            DG = _merge_graph_by_hardware_operator(DG)
+            activity_payload = _remap_activity_to_merged_graph(activity_payload, original_DG, DG)
 
         try:
             with open(ppa_path, "r") as f:
@@ -241,7 +457,7 @@ def _process_one_sample(task: tuple) -> tuple:
         std_dot_path = str(cdfg_dir / "std_pyg_G.dot") if emit_dot else None
         std_df_path = str(cdfg_dir / "std_pyg_G.pt")
         try:
-            std_pyg = generate_pyg_dot(DG, std_dot_path, N_NUM_ITEMS_STD, sa_by_opcode=sa_by_opcode)
+            std_pyg = generate_pyg_dot(DG, std_dot_path, N_NUM_ITEMS_STD, sa_by_opcode=activity_payload)
             std_pyg = nx.convert_node_labels_to_integers(std_pyg)
             generate_dataframe(
                 std_pyg, metric_list, hls_attr_std, bench, prj_name, std_df_path,
@@ -256,7 +472,7 @@ def _process_one_sample(task: tuple) -> tuple:
         rdc_dot_path = str(cdfg_dir / "rdc_pyg_G.dot") if emit_dot else None
         rdc_df_path = str(cdfg_dir / "rdc_pyg_G.pt")
         try:
-            rdc_pyg = generate_pyg_dot(DG, rdc_dot_path, N_NUM_ITEMS_RDC, sa_by_opcode=sa_by_opcode)
+            rdc_pyg = generate_pyg_dot(DG, rdc_dot_path, N_NUM_ITEMS_RDC, sa_by_opcode=activity_payload)
             rdc_pyg = nx.convert_node_labels_to_integers(rdc_pyg)
             generate_dataframe(
                 rdc_pyg, metric_list, hls_attr_rdc, bench, prj_name, rdc_df_path,
@@ -283,6 +499,7 @@ def _build_tasks(
     emit_dot: bool,
     timeout_s: int,
     activity_mode: str = "auto",
+    operator_merge: str = "activity",
 ) -> list[tuple]:
     """Flatten bench/ver/prj_<idx> into a worker task list."""
     tasks: list[tuple] = []
@@ -297,7 +514,7 @@ def _build_tasks(
             except (IndexError, ValueError):
                 continue
             tasks.append(
-                (bench, ver, idx, str(bench_path), board_device, emit_dot, timeout_s, activity_mode)
+                (bench, ver, idx, str(bench_path), board_device, emit_dot, timeout_s, activity_mode, operator_merge)
             )
     return tasks
 
@@ -420,8 +637,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ACTIVITY_MODES,
         default="auto",
         help=(
-            "switching-activity edge features: auto/opcode load opcode SA cache, "
-            "none disables SA/AR, shuffled preserves the cache distribution but breaks opcode mapping"
+            "switching-activity edge features: auto maps trace op ids to sample CDFG nodes "
+            "with opcode fallback, node uses cached node ids only, opcode uses opcode averages, "
+            "none disables SA/AR, shuffled preserves the opcode distribution but breaks mapping"
+        ),
+    )
+    parser.add_argument(
+        "--operator-merge",
+        choices=OPERATOR_MERGE_MODES,
+        default="activity",
+        help=(
+            "ATAPP-style IR/FSMD hardware-operator merge: none keeps the existing CDFG, "
+            "activity merges SA/AR across shared RTL operators, graph also collapses "
+            "shared RTL operators into one graph node"
         ),
     )
     parser.add_argument(
@@ -460,6 +688,7 @@ def main(argv: list[str] | None = None) -> None:
         emit_dot=args.emit_dot,
         timeout_s=args.sample_timeout,
         activity_mode=args.activity_mode,
+        operator_merge=args.operator_merge,
     )
     if not tasks:
         print("No ppa_*.json samples found, nothing to do.")
