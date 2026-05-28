@@ -55,8 +55,8 @@ def test_pyproject_routes_rapidwright_to_local_source():
 
 def test_dockerfile_and_docs_use_uv_sync():
     dockerfile = (ROOT / "Dockerfile").read_text()
-    readme = (ROOT / "README.dev.md").read_text()
-    docker_readme = (ROOT / "README.dockerfile.md").read_text()
+    readme = (ROOT / "docs" / "setup" / "development.md").read_text()
+    docker_readme = (ROOT / "docs" / "setup" / "dockerfile.md").read_text()
 
     assert "COPY pyproject.toml uv.lock ./" in dockerfile
     assert "uv sync --no-install-project" in dockerfile
@@ -69,7 +69,7 @@ def test_dockerfile_and_docs_use_uv_sync():
 
 def test_readme_mentions_rapidwright_cache_workflow():
     readme = (ROOT / "README.md").read_text()
-    dev_readme = (ROOT / "README.dev.md").read_text()
+    dev_readme = (ROOT / "docs" / "setup" / "development.md").read_text()
 
     assert "RapidWright" in readme
     assert "std_arch" in readme

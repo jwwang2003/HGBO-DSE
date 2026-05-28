@@ -44,7 +44,7 @@ HGBO-DSE datasets, `--num-workers 0` avoids worker startup overhead and was
 faster than the attempted `--num-workers 4` CPU run:
 
 ```
-uv run python -m hgp.hier_arch_model --target lut --epochs 1 --arch-mode atapp --device cpu --cpu-threads 16 --num-workers 0
+uv run python -m hgp.hier_arch_model --target lut --epochs 1 --arch-mode arch-aware --device cpu --cpu-threads 16 --num-workers 0
 ```
 
 The default architecture-aware design encoder is `--conv-type gine`, so design

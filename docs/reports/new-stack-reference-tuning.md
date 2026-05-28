@@ -13,7 +13,8 @@ All runs use:
 ## Production Refresh: 2026-05-21 Overnight
 
 The older sections below are retained as tuning history. The current
-production-candidate v2 result is documented in `V2_PRODUCTION_REPRODUCTION.md`.
+production-candidate v2 result is documented in
+[`v2-production-reproduction.md`](v2-production-reproduction.md).
 
 Full refresh command:
 
@@ -45,7 +46,8 @@ accuracy from scratch.
 ## Architecture-Embedding Follow-Up: 2026-05-22
 
 The architecture-embedding follow-up is documented in
-`V2_PRODUCTION_REPRODUCTION.md` and `ARCH_AWARE_HGBO_DSE_REPORT.md`.
+[`v2-production-reproduction.md`](v2-production-reproduction.md) and
+[`arch-aware-hgbo-dse-report.md`](arch-aware-hgbo-dse-report.md).
 
 Run command:
 

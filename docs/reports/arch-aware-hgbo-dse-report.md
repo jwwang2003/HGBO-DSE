@@ -37,8 +37,9 @@ Conclusion: architecture embeddings are useful for CP and improve raw BRAM
 substantially, but they are not a global replacement for the stable v2 HGP
 settings on this single-device dataset. The production recommendation is a
 hybrid: stable non-arch HGP for LUT/FF/Power/DSP, architecture-aware HGP for
-CP, and the residual calibrator for BRAM. See `V2_PRODUCTION_REPRODUCTION.md`
-for the maintained runbook and acceptance gates.
+CP, and the residual calibrator for BRAM. See
+[`v2-production-reproduction.md`](v2-production-reproduction.md) for the
+maintained runbook and acceptance gates.
 
 ## Status
 

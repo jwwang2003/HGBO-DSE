@@ -1,5 +1,23 @@
 # HGBO-DSE Framework
 
+## Repository Layout
+
+- `hgp/`: graph construction, original HGP trainers, architecture-aware trainer,
+  multi-board loading, and reporting utilities.
+- `bome/`: Bayesian optimization and DSE entry points.
+- `backend/`: MCP/remote inference service code.
+- `scripts/`: reproducible training, repair, audit, and reporting commands.
+- `tests/`: regression tests for data processing, training utilities,
+  prediction compatibility, and backend behavior.
+- `docs/setup/`: host, Docker, and environment notes.
+- `docs/reports/`: maintained reproduction and architecture-aware experiment
+  reports.
+- `docs/experiments/`: curated JSON summaries used by the thesis/reporting
+  narrative.
+- `dataset/`, `img/training/`, and root-level `model*` directories are generated
+  outputs and are ignored unless explicitly documented otherwise. The committed
+  inference checkpoints live under `hgp/model/`.
+
 <figure>
 <img src=img/hgbo.svg alt="Trulli" style="width:100%">
 <figcaption align="left">
@@ -78,7 +96,7 @@ For RapidWright ATAPP-aware training, use:
 
 ```bash
 cd hgp
-python3 hier_arch_model.py --target lut --arch-mode atapp
+python3 hier_arch_model.py --target lut --arch-mode arch-aware
 ```
 
 The ATAPP-aware trainer defaults to an edge-attribute-aware GINE design encoder,
@@ -98,7 +116,7 @@ uv run python -m hgp.hier_arch_model \
   --epochs 30 \
   --lr 0.001 \
   --grad-clip 1.0 \
-  --arch-mode atapp \
+  --arch-mode arch-aware \
   --device cpu \
   --cpu-threads 16 \
   --num-workers 0 \
@@ -112,7 +130,7 @@ PYTHONUNBUFFERED=1 uv run python -m hgp.reporting.compare_training_graphs \
   --epochs 30 \
   --lr 0.001 \
   --grad-clip 1.0 \
-  --arch-mode atapp \
+  --arch-mode arch-aware \
   --device cpu \
   --cpu-threads 16 \
   --num-workers 0 \
